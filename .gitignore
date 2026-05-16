@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio / Rider local state
+.vs/
+.idea/
+*.user
+*.suo
+
+# Publish output (covered by bin/, listed for clarity)
+publish/
+
+# Stray logs from ad-hoc runs (e.g. PowerShell tee captures)
+*.log
+
+# OS/editor noise
+Thumbs.db
+.DS_Store

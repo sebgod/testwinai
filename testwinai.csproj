@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.22621.0</TargetPlatformMinVersion>
+    <RuntimeIdentifiers>win-arm64;win-x64</RuntimeIdentifiers>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>TestWinAi</RootNamespace>
+
+    <!-- Unpackaged console app that uses WinAppSDK -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <UseWinUI>false</UseWinUI>
+    <EnableMsixTooling>false</EnableMsixTooling>
+
+    <!-- AOT -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <CsWinRTAotOptimizerEnabled>true</CsWinRTAotOptimizerEnabled>
+    <TrimMode>partial</TrimMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Phi Silica + Windows AI Text/Imaging APIs live here. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
+
+    <!-- ExecutionProviderCatalog (bring-your-own ONNX path). -->
+    <PackageReference Include="Microsoft.Windows.AI.MachineLearning" Version="2.0.300" />
+
+    <!-- ORT GenAI with the QNN execution provider for direct NPU inference.
+         The .QNN flavor transitively brings Microsoft.ML.OnnxRuntime.QNN 1.24.4
+         which bundles the QNN EP native binaries (HTP backend for Hexagon NPU). -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.QNN" Version="0.13.1" />
+    <PackageReference Include="System.CommandLine" Version="2.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ORT + OGA do reflection over tensor element types; keep both intact under the trimmer. -->
+    <TrimmerRootAssembly Include="Microsoft.ML.OnnxRuntime" />
+    <TrimmerRootAssembly Include="Microsoft.ML.OnnxRuntimeGenAI" />
+  </ItemGroup>
+
+</Project>
