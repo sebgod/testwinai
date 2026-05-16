@@ -1,6 +1,9 @@
 using System.CommandLine;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 using Microsoft.ML.OnnxRuntimeGenAI;
 using Microsoft.Windows.AI;
@@ -16,11 +19,13 @@ namespace TestWinAi;
 //                           (default when no subcommand given)
 //   generate --model <dir>  one-shot Qwen2.5-family inference on the NPU via QNN HTP
 //   chat     --model <dir>  interactive REPL with ChatML template + persistent KV cache
+//   bench    --model <dir>  run a system-prompt × task suite, write JSON + markdown for
+//                           offline scoring (use built-in suite or --suite <file>)
 //
 // The readiness probe runs at the top of every subcommand so it's obvious what's gated off
 // vs. just not installed. On this corp-policy box every projected Windows AI feature reports
 // CapabilityMissing because Recall is GPO-disabled (see CLAUDE.md).
-internal static class Program
+internal static partial class Program
 {
     private static async Task<int> Main(string[] args)
     {
@@ -155,9 +160,42 @@ internal static class Program
             return 0;
         });
 
+        // bench
+        var benchSuiteOption = new Option<FileInfo?>("--suite")
+        {
+            Description = "Path to a JSON suite (systemPrompts + tasks). " +
+                          "Omit to use the built-in default suite.",
+        };
+        var benchOutputOption = new Option<DirectoryInfo?>("--output", "-o")
+        {
+            Description = "Directory for bench-<timestamp>.{json,md}. Defaults to the current directory.",
+        };
+        var benchCmd = new Command(
+            "bench",
+            "Run a system-prompt × task suite and write JSON + markdown for offline scoring.")
+        {
+            modelOption, benchSuiteOption, benchOutputOption,
+            temperatureOption, topPOption, repetitionPenaltyOption, maxPerTurnOption,
+        };
+        benchCmd.SetAction(async (pr, _) =>
+        {
+            var dir = pr.GetValue(modelOption);
+            if (dir is null) { Console.Error.WriteLine("--model is required."); return 1; }
+            await DiagnosticsHeaderAsync();
+            RunBench(
+                dir.FullName,
+                pr.GetValue(benchSuiteOption)?.FullName,
+                pr.GetValue(benchOutputOption)?.FullName ?? Environment.CurrentDirectory,
+                pr.GetValue(temperatureOption),
+                pr.GetValue(topPOption),
+                pr.GetValue(repetitionPenaltyOption),
+                pr.GetValue(maxPerTurnOption));
+            return 0;
+        });
+
         var root = new RootCommand("testwinai — Windows AI / Snapdragon X Elite NPU exploration.")
         {
-            probeCmd, generateCmd, chatCmd,
+            probeCmd, generateCmd, chatCmd, benchCmd,
         };
 
         // No subcommand → probe.
@@ -181,7 +219,8 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("(tips:");
         Console.WriteLine("    testwinai generate --model <dir> \"<prompt>\"   one-shot NPU inference");
-        Console.WriteLine("    testwinai chat     --model <dir>              multi-turn REPL with KV-cache)");
+        Console.WriteLine("    testwinai chat     --model <dir>              multi-turn REPL with KV-cache");
+        Console.WriteLine("    testwinai bench    --model <dir>              system-prompt × task suite)");
     }
 
     private static async Task DiagnosticsHeaderAsync()
@@ -570,6 +609,367 @@ internal static class Program
             tokenizer.Dispose();
             model.Dispose();
         }
+    }
+
+    // ---------- Bench: system-prompt × task suite ----------
+    //
+    // Cross-product runner: for each (system_prompt, task) cell, prefill a fresh Generator
+    // with the system + user wrapped in ChatML, decode to EOS / cap / collapse, capture
+    // response + timings + cheap heuristic flags. Writes a structured JSON file (for
+    // offline LLM-as-judge scoring) and a markdown file (for eyeballing).
+
+    private sealed record BenchSystemPrompt(string Id, string Text);
+    private sealed record BenchTask(string Id, string Prompt);
+    private sealed record BenchSuite(BenchSystemPrompt[] SystemPrompts, BenchTask[] Tasks);
+
+    private sealed record BenchHeuristics(
+        bool EndsWithQuestion,
+        bool RestatedPrompt,
+        bool HitTokenCap,
+        bool Collapsed);
+
+    private sealed record BenchResult(
+        string TaskId,
+        string SystemPromptId,
+        string TaskPrompt,
+        string SystemText,
+        string Response,
+        int Tokens,
+        long PrefillMs,
+        long DecodeMs,
+        double DecodeTokPerSec,
+        string StopReason,
+        BenchHeuristics Heuristics);
+
+    private sealed record BenchRunConfig(
+        double Temperature,
+        double TopP,
+        double RepetitionPenalty,
+        int MaxTokensPerTurn);
+
+    private sealed record BenchOutput(
+        string ModelDir,
+        string ModelName,
+        string StartedAt,
+        BenchRunConfig Config,
+        BenchResult[] Results);
+
+    [JsonSourceGenerationOptions(
+        PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+        WriteIndented = true)]
+    [JsonSerializable(typeof(BenchSuite))]
+    [JsonSerializable(typeof(BenchOutput))]
+    private partial class BenchJsonContext : JsonSerializerContext { }
+
+    // Built-in default suite — covers the failure modes we hit in earlier sessions
+    // (code task that collapsed into whitespace, list task that drifted into Chinese,
+    // length-discipline / yes-no compliance, no unsolicited follow-ups).
+    private const string DefaultBenchSuite = """
+    {
+      "systemPrompts": [
+        { "id": "current",  "text": "You are a concise assistant. Keep replies focused. Avoid unsolicited follow-up questions and don't restate the prompt." },
+        { "id": "minimal",  "text": "You are a helpful assistant." },
+        { "id": "strict",   "text": "Answer in as few words as possible. Do not add explanations unless explicitly requested. Do not ask follow-up questions. Never restate the question." },
+        { "id": "format",   "text": "You are a concise assistant. Follow the user's requested format exactly. Code goes in fenced blocks. Yes/no questions get a yes or no. Lists get lists. Do not ask follow-ups." }
+      ],
+      "tasks": [
+        { "id": "palindrome",     "prompt": "Write a Python function to check if a string is a palindrome." },
+        { "id": "continents",     "prompt": "List the 3 most populous continents and their approximate populations." },
+        { "id": "hexagon",        "prompt": "What is the Qualcomm Hexagon NPU? Answer in one sentence." },
+        { "id": "sky-yesno",      "prompt": "Is the sky blue? Answer yes or no." },
+        { "id": "python-install", "prompt": "How do I install Python on Windows?" },
+        { "id": "translate-fr",   "prompt": "Translate 'hello world' to French." },
+        { "id": "math",           "prompt": "What is 17 multiplied by 23?" },
+        { "id": "hamlet",         "prompt": "Summarize the plot of Hamlet in one sentence." }
+      ]
+    }
+    """;
+
+    private static void RunBench(
+        string modelDir,
+        string? suitePath,
+        string outputDir,
+        double temperature,
+        double topP,
+        double repetitionPenalty,
+        int maxTokensPerTurn)
+    {
+        Console.WriteLine();
+        Console.WriteLine("== Bench (Qwen2.5 on QNN HTP) ==");
+        Console.WriteLine($"Model dir: {modelDir}");
+
+        if (!Directory.Exists(modelDir))
+        {
+            Console.WriteLine($"  Model directory does not exist: {modelDir}");
+            return;
+        }
+
+        string suiteJson;
+        if (suitePath is null)
+        {
+            Console.WriteLine("  Suite: <built-in default>");
+            suiteJson = DefaultBenchSuite;
+        }
+        else
+        {
+            Console.WriteLine($"  Suite: {suitePath}");
+            suiteJson = File.ReadAllText(suitePath);
+        }
+
+        BenchSuite suite;
+        try
+        {
+            suite = JsonSerializer.Deserialize(suiteJson, BenchJsonContext.Default.BenchSuite)
+                ?? throw new InvalidOperationException("suite deserialized to null");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Failed to parse suite: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        var totalCells = suite.SystemPrompts.Length * suite.Tasks.Length;
+        Console.WriteLine(
+            $"  System prompts: {suite.SystemPrompts.Length}, tasks: {suite.Tasks.Length}, cells: {totalCells}");
+        Console.WriteLine(
+            $"  temperature={temperature}, top-p={topP}, rep-penalty={repetitionPenalty}, max-tokens-per-turn={maxTokensPerTurn}");
+
+        var (model, tokenizer, loadMs) = LoadQnnModel(modelDir);
+        try
+        {
+            Console.WriteLine($"  load: {loadMs} ms");
+
+            var results = new List<BenchResult>(totalCells);
+            var cellIdx = 0;
+            var swAll = Stopwatch.StartNew();
+
+            foreach (var sys in suite.SystemPrompts)
+            {
+                foreach (var task in suite.Tasks)
+                {
+                    cellIdx++;
+                    Console.WriteLine();
+                    Console.WriteLine($"-- [{cellIdx}/{totalCells}] task={task.Id} system={sys.Id} --");
+
+                    var result = RunBenchCell(
+                        model, tokenizer, sys, task,
+                        temperature, topP, repetitionPenalty, maxTokensPerTurn);
+                    results.Add(result);
+
+                    var flags = new List<string>();
+                    if (result.Heuristics.EndsWithQuestion) flags.Add("?");
+                    if (result.Heuristics.RestatedPrompt) flags.Add("restate");
+                    if (result.Heuristics.HitTokenCap) flags.Add("cap");
+                    if (result.Heuristics.Collapsed) flags.Add("collapse");
+                    var flagStr = flags.Count > 0 ? $" [{string.Join(",", flags)}]" : "";
+
+                    Console.WriteLine(
+                        $"  {result.Tokens} tok, prefill={result.PrefillMs} ms, decode={result.DecodeMs} ms " +
+                        $"({result.DecodeTokPerSec:0.0} tok/s), stop={result.StopReason}{flagStr}");
+                }
+            }
+
+            swAll.Stop();
+            Console.WriteLine();
+            Console.WriteLine($"All cells done in {swAll.ElapsedMilliseconds / 1000.0:0.0} s.");
+
+            Directory.CreateDirectory(outputDir);
+            var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            var jsonPath = Path.Combine(outputDir, $"bench-{timestamp}.json");
+            var mdPath = Path.Combine(outputDir, $"bench-{timestamp}.md");
+
+            var modelName = Path.GetFileName(
+                modelDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            var output = new BenchOutput(
+                modelDir,
+                modelName,
+                DateTime.Now.ToString("o"),
+                new BenchRunConfig(temperature, topP, repetitionPenalty, maxTokensPerTurn),
+                results.ToArray());
+
+            File.WriteAllText(
+                jsonPath,
+                JsonSerializer.Serialize(output, BenchJsonContext.Default.BenchOutput));
+            File.WriteAllText(mdPath, RenderBenchMarkdown(output, suite));
+
+            Console.WriteLine("Wrote:");
+            Console.WriteLine($"  {jsonPath}");
+            Console.WriteLine($"  {mdPath}");
+        }
+        finally
+        {
+            tokenizer.Dispose();
+            model.Dispose();
+        }
+    }
+
+    private static BenchResult RunBenchCell(
+        Model model,
+        Tokenizer tokenizer,
+        BenchSystemPrompt sys,
+        BenchTask task,
+        double temperature,
+        double topP,
+        double repetitionPenalty,
+        int maxTokensPerTurn)
+    {
+        using var gparams = new GeneratorParams(model);
+        // Cells are independent; max_length is the session ceiling, not the per-turn cap.
+        gparams.SetSearchOption("max_length", 4096);
+        gparams.SetSearchOption("do_sample", temperature > 0.0);
+        gparams.SetSearchOption("temperature", temperature);
+        gparams.SetSearchOption("top_p", topP);
+        gparams.SetSearchOption("repetition_penalty", repetitionPenalty);
+
+        using var generator = new Generator(model, gparams);
+
+        if (!string.IsNullOrWhiteSpace(sys.Text))
+        {
+            using var sysTokens = tokenizer.Encode(ChatMlSystemOpen + sys.Text + ChatMlSystemClose);
+            generator.AppendTokenSequences(sysTokens);
+        }
+        using var userTokens = tokenizer.Encode(
+            ChatMlUserOpen + task.Prompt + ChatMlUserClose + ChatMlAssistantOpen);
+        generator.AppendTokenSequences(userTokens);
+
+        using var stream = tokenizer.CreateStream();
+        var sb = new StringBuilder();
+        var sw = Stopwatch.StartNew();
+        long firstTokenMs = 0;
+        int tokens = 0;
+        int consecutiveBlank = 0;
+        bool collapsed = false;
+        bool capped = false;
+        string stopReason = "eos";
+
+        try
+        {
+            while (!generator.IsDone())
+            {
+                generator.GenerateNextToken();
+                if (tokens == 0) firstTokenMs = sw.ElapsedMilliseconds;
+
+                var seq = generator.GetSequence(0);
+                int lastToken = seq[seq.Length - 1];
+                if (lastToken == QwenImEndToken) break;
+
+                var decoded = stream.Decode(lastToken);
+                sb.Append(decoded);
+                tokens++;
+
+                if (string.IsNullOrWhiteSpace(decoded))
+                {
+                    consecutiveBlank++;
+                    if (consecutiveBlank > 16) { collapsed = true; stopReason = "collapse"; break; }
+                }
+                else
+                {
+                    consecutiveBlank = 0;
+                }
+
+                if (tokens >= maxTokensPerTurn) { capped = true; stopReason = "cap"; break; }
+            }
+        }
+        catch (Exception ex)
+        {
+            stopReason = $"error:{ex.GetType().Name}";
+        }
+        sw.Stop();
+
+        var decodeMs = sw.ElapsedMilliseconds - firstTokenMs;
+        var tokPerSec = tokens > 1 && decodeMs > 0
+            ? (tokens - 1) * 1000.0 / decodeMs
+            : 0.0;
+
+        var response = sb.ToString();
+        return new BenchResult(
+            task.Id, sys.Id, task.Prompt, sys.Text, response,
+            tokens, firstTokenMs, decodeMs, tokPerSec, stopReason,
+            ComputeHeuristics(task.Prompt, response, capped, collapsed));
+    }
+
+    private static BenchHeuristics ComputeHeuristics(
+        string prompt, string response, bool capped, bool collapsed)
+    {
+        var trimmed = response.TrimEnd();
+        var endsWithQuestion = trimmed.EndsWith('?');
+
+        // Restated-prompt heuristic: drop non-alphanumerics, lowercase, then check whether
+        // the response opens with the same ~30 chars as the prompt. Cheap and cheerful;
+        // catches "To check if a string is a palindrome…" echoed back at us, not paraphrases.
+        var promptNorm = NormalizeForOverlap(prompt);
+        var responseNorm = NormalizeForOverlap(response);
+        var compareLen = Math.Min(30, Math.Min(promptNorm.Length, responseNorm.Length));
+        var restated = compareLen >= 10 &&
+            promptNorm.AsSpan(0, compareLen).SequenceEqual(responseNorm.AsSpan(0, compareLen));
+
+        return new BenchHeuristics(endsWithQuestion, restated, capped, collapsed);
+
+        static string NormalizeForOverlap(string s)
+        {
+            var sb = new StringBuilder(s.Length);
+            foreach (var c in s)
+                if (char.IsLetterOrDigit(c)) sb.Append(char.ToLowerInvariant(c));
+            return sb.ToString();
+        }
+    }
+
+    private static string RenderBenchMarkdown(BenchOutput output, BenchSuite suite)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# Bench results");
+        sb.AppendLine();
+        sb.AppendLine($"- Model: `{output.ModelName}`");
+        sb.AppendLine($"- Started: {output.StartedAt}");
+        sb.AppendLine(
+            $"- Config: temperature={output.Config.Temperature}, top-p={output.Config.TopP}, " +
+            $"repetition-penalty={output.Config.RepetitionPenalty}, " +
+            $"max-tokens-per-turn={output.Config.MaxTokensPerTurn}");
+        sb.AppendLine();
+
+        sb.AppendLine("## System prompts");
+        sb.AppendLine();
+        foreach (var sys in suite.SystemPrompts)
+        {
+            sb.AppendLine($"### `{sys.Id}`");
+            sb.AppendLine($"> {sys.Text}");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("## Results by task");
+        sb.AppendLine();
+
+        foreach (var task in suite.Tasks)
+        {
+            sb.AppendLine($"### Task: `{task.Id}`");
+            sb.AppendLine();
+            sb.AppendLine($"**Prompt:** {task.Prompt}");
+            sb.AppendLine();
+
+            foreach (var cell in output.Results)
+            {
+                if (cell.TaskId != task.Id) continue;
+
+                var flags = new List<string>();
+                if (cell.Heuristics.EndsWithQuestion) flags.Add("ends-with-?");
+                if (cell.Heuristics.RestatedPrompt) flags.Add("restated");
+                if (cell.Heuristics.HitTokenCap) flags.Add("hit-cap");
+                if (cell.Heuristics.Collapsed) flags.Add("collapse");
+                var flagStr = flags.Count > 0 ? $" — flags: {string.Join(", ", flags)}" : "";
+
+                sb.AppendLine(
+                    $"#### `{cell.SystemPromptId}` " +
+                    $"({cell.Tokens} tok, {cell.DecodeTokPerSec:0.0} tok/s, " +
+                    $"stop={cell.StopReason}{flagStr})");
+                sb.AppendLine();
+                sb.AppendLine("```");
+                sb.AppendLine(cell.Response.Trim());
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+        }
+
+        return sb.ToString();
     }
 
     // ---------- ML Execution Provider catalog ----------

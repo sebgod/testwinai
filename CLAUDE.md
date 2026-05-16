@@ -70,6 +70,24 @@ dotnet run -c Release
 dotnet run -c Release -- generate --model C:\temp\models-qwen2.5-7b "<prompt>"
 # Interactive chat
 dotnet run -c Release -- chat --model C:\temp\models-qwen2.5-7b
+# System-prompt × task benchmark (built-in default suite; --suite for custom)
+dotnet run -c Release -- bench --model C:\temp\models-qwen2.5-7b
+```
+
+The `bench` subcommand cross-products a list of system-prompt variants with a list
+of tasks, runs each cell on the NPU, and writes:
+
+- `bench-<timestamp>.json` — structured results (one record per cell with response,
+  prefill/decode timings, stop reason, heuristic flags). Designed to be read by an
+  LLM-as-judge in a later session for scoring/ranking.
+- `bench-<timestamp>.md` — same data, human-readable side-by-side per task.
+
+A custom suite is a JSON file with the shape:
+```json
+{
+  "systemPrompts": [ { "id": "...", "text": "..." } ],
+  "tasks":         [ { "id": "...", "prompt": "..." } ]
+}
 ```
 
 Forward slashes also work for the path (`C:/temp/models-qwen2.5-7b`) and are
