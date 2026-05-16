@@ -52,8 +52,10 @@ on Intel/AMD/non-X-Elite ARM.
   `Get-WindowsCapability -Online` shows no entries for them even as
   `NotPresent`. They ship via Store-side AI Component Search gated on the
   Recall/Copilot+ umbrella. `Add-WindowsCapability` is a dead end.
-- The readiness probe + Phi Silica attempt remain in `Program.cs` as
-  diagnostics; they print `CapabilityMissing` and skip cleanly.
+- The readiness probe for the vision/imaging features remains in `Program.cs`
+  as a diagnostic (prints `CapabilityMissing` and skips cleanly). The Phi Silica
+  probe was removed — we use ORT-GenAI + QNN directly for text and there's no
+  point round-tripping a known-blocked WinAI surface every run.
 
 ## Build & run
 
