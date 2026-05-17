@@ -92,11 +92,10 @@ internal static partial class Program
 
         var systemOption = new Option<string?>("--system")
         {
-            Description = "System message prepended to the chat. Default keeps Qwen2.5 brief; " +
-                          "pass --system \"\" to disable, or --system \"…\" to override entirely.",
-            DefaultValueFactory = _ =>
-                "You are a concise assistant. Keep replies focused. " +
-                "Avoid unsolicited follow-up questions and don't restate the prompt.",
+            Description = "Chat system message. Default is template-dependent: ChatML " +
+                          "(Qwen) gets a concise-assistant prompt; deepseek-r1 defaults " +
+                          "to empty per the model's usage guidance. Pass --system \"\" " +
+                          "to force empty regardless, or --system \"...\" to override.",
         };
 
         var promptArgument = new Argument<string[]>("prompt")
@@ -176,6 +175,10 @@ internal static partial class Program
             {
                 var (bundleDir, template) = ResolveModel(
                     dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
+                // null = user didn't pass --system, fall back to template default.
+                // "" = user explicitly disabled, honor as-is.
+                var explicitSystem = pr.GetValue(systemOption);
+                var system = explicitSystem ?? template.DefaultSystemPrompt;
                 RunChat(
                     bundleDir,
                     template,
@@ -183,7 +186,7 @@ internal static partial class Program
                     pr.GetValue(maxPerTurnOption),
                     pr.GetValue(temperatureOption),
                     pr.GetValue(topPOption),
-                    pr.GetValue(systemOption),
+                    system,
                     pr.GetValue(repetitionPenaltyOption),
                     pr.GetValue(noRepeatNgramOption));
                 return 0;
@@ -440,7 +443,10 @@ internal static partial class Program
         string SystemOpen, string SystemClose,
         string UserOpen, string UserClose,
         string AssistantOpen, string AssistantClose,
-        int EosTokenId)
+        int EosTokenId,
+        // Per-family default system prompt for chat. Used when --system isn't passed
+        // on the CLI; an explicit --system (including --system "") always wins.
+        string DefaultSystemPrompt)
     {
         // Build a fresh single-turn prefill (system message folded in if present).
         // Caller appends the result once via AppendTokenSequences.
@@ -458,7 +464,10 @@ internal static partial class Program
             UserOpen: "<|im_start|>user\n",   UserClose: "<|im_end|>\n",
             AssistantOpen: "<|im_start|>assistant\n", AssistantClose: "<|im_end|>\n",
             // <|im_end|> in Qwen2.5 vocab.
-            EosTokenId: 151645);
+            EosTokenId: 151645,
+            DefaultSystemPrompt:
+                "You are a concise assistant. Keep replies focused. " +
+                "Avoid unsolicited follow-up questions and don't restate the prompt.");
 
         // DeepSeek-R1-Distill-* template. The special-token strings use fullwidth pipes
         // (U+FF5C ｜) and the BPE lower-one-eighth-block (U+2581 ▁), NOT ASCII | and _.
@@ -474,7 +483,13 @@ internal static partial class Program
             AssistantOpen: "<｜Assistant｜>",
             AssistantClose: "<｜end▁of▁sentence｜>",
             // <｜end▁of▁sentence｜> in DeepSeek-R1-Distill-Qwen tokenizer.
-            EosTokenId: 151643);
+            EosTokenId: 151643,
+            // R1-distill ships with explicit guidance to avoid system prompts —
+            // instructions belong in the user message. The model emits its <think>
+            // reasoning regardless of any system message, and prefacing the chat
+            // with a "be concise" instruction has no measurable effect on output
+            // length or format. Leaving this empty by default per DeepSeek's docs.
+            DefaultSystemPrompt: "");
 
         public static ChatTemplate Parse(string name) => name.ToLowerInvariant() switch
         {
