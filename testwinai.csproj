@@ -42,4 +42,14 @@
     <TrimmerRootAssembly Include="Microsoft.ML.OnnxRuntimeGenAI" />
   </ItemGroup>
 
+  <!--
+    Cross-repo ProjectReference into sharpastro/Console.Lib for the alt-screen
+    TUI chat path (MarkdownRenderer, VirtualTerminal, TerminalLayout, TextInputBar).
+    Pulls Console.Lib + transitive LALR.CC, DIR.Lib, Fonts.Lib, StbImageSharp from
+    sibling working trees. Console.Lib is IsAotCompatible=true so this stays AOT-clean.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\sharpastro\Console.Lib\src\Console.Lib\Console.Lib.csproj" />
+  </ItemGroup>
+
 </Project>

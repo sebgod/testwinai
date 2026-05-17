@@ -133,7 +133,7 @@ internal static partial class Program
             }
             catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
             {
-                Console.Error.WriteLine(ex.Message);
+                System.Console.Error.WriteLine(ex.Message);
                 return 1;
             }
         });
@@ -187,7 +187,7 @@ internal static partial class Program
                 var chatMax = pr.GetValue(chatMaxOption) ?? template.DefaultSessionMaxLength;
                 var perTurn = pr.GetValue(maxPerTurnOption) ?? template.DefaultMaxTokensPerTurn;
                 (chatMax, perTurn) = ApplyContextCap(bundleDir, chatMax, perTurn);
-                RunChat(
+                await RunChat(
                     bundleDir,
                     template,
                     chatMax,
@@ -201,7 +201,7 @@ internal static partial class Program
             }
             catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
             {
-                Console.Error.WriteLine(ex.Message);
+                System.Console.Error.WriteLine(ex.Message);
                 return 1;
             }
         });
@@ -246,7 +246,7 @@ internal static partial class Program
             }
             catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
             {
-                Console.Error.WriteLine(ex.Message);
+                System.Console.Error.WriteLine(ex.Message);
                 return 1;
             }
         });
@@ -291,8 +291,8 @@ internal static partial class Program
         var dest = Path.Combine(rootDir, entry.Slug);
         Directory.CreateDirectory(rootDir);
 
-        Console.WriteLine($"== Download {entry.HfRepoId}");
-        Console.WriteLine($"   destination: {dest}");
+        System.Console.WriteLine($"== Download {entry.HfRepoId}");
+        System.Console.WriteLine($"   destination: {dest}");
 
         var psi = new ProcessStartInfo("hf")
         {
@@ -311,24 +311,24 @@ internal static partial class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"  failed to launch `hf`: {ex.Message}");
-            Console.Error.WriteLine("  Install with: pip install huggingface_hub");
+            System.Console.Error.WriteLine($"  failed to launch `hf`: {ex.Message}");
+            System.Console.Error.WriteLine("  Install with: pip install huggingface_hub");
             return 1;
         }
         await p.WaitForExitAsync();
         if (p.ExitCode != 0)
         {
-            Console.Error.WriteLine($"  hf exited with code {p.ExitCode}");
+            System.Console.Error.WriteLine($"  hf exited with code {p.ExitCode}");
             return p.ExitCode;
         }
 
         foreach (var patch in entry.Patches)
         {
-            Console.WriteLine($"   patch: {patch}");
+            System.Console.WriteLine($"   patch: {patch}");
             ApplyPatch(dest, patch);
         }
 
-        Console.WriteLine($"   ready: testwinai chat{(thinking ? " --thinking" : "")}");
+        System.Console.WriteLine($"   ready: testwinai chat{(thinking ? " --thinking" : "")}");
         return 0;
     }
 
@@ -355,7 +355,7 @@ internal static partial class Program
         var orig = path + ".orig";
         if (File.Exists(orig))
         {
-            Console.WriteLine("     (already patched — .orig exists)");
+            System.Console.WriteLine("     (already patched — .orig exists)");
             return;
         }
         var raw = File.ReadAllText(path);
@@ -363,7 +363,7 @@ internal static partial class Program
         var pipeline = root["model"]?["decoder"]?["pipeline"]?.AsArray();
         if (pipeline is null || pipeline.Count == 0)
         {
-            Console.WriteLine("     (no pipeline in genai_config.json; nothing to do)");
+            System.Console.WriteLine("     (no pipeline in genai_config.json; nothing to do)");
             return;
         }
         var stages = pipeline[0]!.AsObject();
@@ -387,7 +387,7 @@ internal static partial class Program
         }
         File.WriteAllText(orig, raw);
         File.WriteAllText(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        Console.WriteLine($"     stripped backend_path from {stripped} stage(s); backup at {Path.GetFileName(orig)}");
+        System.Console.WriteLine($"     stripped backend_path from {stripped} stage(s); backup at {Path.GetFileName(orig)}");
     }
 
     // ---------- Probe (no model required) ----------
@@ -398,14 +398,14 @@ internal static partial class Program
         DumpReadiness();
         await DumpEpCatalogAsync();
 
-        Console.WriteLine();
-        Console.WriteLine("(tips:");
-        Console.WriteLine("    testwinai download                fetch the default Qwen2.5-7B bundle");
-        Console.WriteLine("    testwinai download --thinking     fetch the DeepSeek-R1-Distill-7B bundle");
-        Console.WriteLine("    testwinai generate \"<prompt>\"     one-shot inference (--thinking for R1)");
-        Console.WriteLine("    testwinai chat                    multi-turn REPL (--thinking for R1)");
-        Console.WriteLine("    testwinai bench                   system-prompt × task suite");
-        Console.WriteLine($"   --model defaults to {DefaultModelsRoot} (override for a custom location))");
+        System.Console.WriteLine();
+        System.Console.WriteLine("(tips:");
+        System.Console.WriteLine("    testwinai download                fetch the default Qwen2.5-7B bundle");
+        System.Console.WriteLine("    testwinai download --thinking     fetch the DeepSeek-R1-Distill-7B bundle");
+        System.Console.WriteLine("    testwinai generate \"<prompt>\"     one-shot inference (--thinking for R1)");
+        System.Console.WriteLine("    testwinai chat                    multi-turn REPL (--thinking for R1)");
+        System.Console.WriteLine("    testwinai bench                   system-prompt × task suite");
+        System.Console.WriteLine($"   --model defaults to {DefaultModelsRoot} (override for a custom location))");
     }
 
     private static async Task DiagnosticsHeaderAsync()
@@ -421,8 +421,8 @@ internal static partial class Program
     // and we use ORT-GenAI + QNN directly for text generation.
     private static void DumpReadiness()
     {
-        Console.WriteLine();
-        Console.WriteLine("== Windows AI feature readiness ==");
+        System.Console.WriteLine();
+        System.Console.WriteLine("== Windows AI feature readiness ==");
         PrintState("TextRecognizer       (OCR)       ", SafeReadyState(TextRecognizer.GetReadyState));
         PrintState("ImageDescription                 ", SafeReadyState(ImageDescriptionGenerator.GetReadyState));
         PrintState("ImageScaler          (super-res) ", SafeReadyState(ImageScaler.GetReadyState));
@@ -436,7 +436,7 @@ internal static partial class Program
         }
 
         static void PrintState(string label, AIFeatureReadyState? state)
-            => Console.WriteLine($"  {label} : {(state is null ? "<throw>" : state.ToString())}");
+            => System.Console.WriteLine($"  {label} : {(state is null ? "<throw>" : state.ToString())}");
     }
 
     // ---------- ORT-GenAI on the QNN execution provider (direct NPU path) ----------
@@ -639,7 +639,7 @@ internal static partial class Program
         var adjustedPerTurn = Math.Min(perTurn, adjustedMax);
         if (adjustedMax != maxLength || adjustedPerTurn != perTurn)
         {
-            Console.WriteLine(
+            System.Console.WriteLine(
                 $"  (capping to model context_length={ctx}: max_length {maxLength}→{adjustedMax}, " +
                 $"per-turn {perTurn}→{adjustedPerTurn})");
         }
@@ -710,22 +710,22 @@ internal static partial class Program
 
     private static void RunOneShot(string modelDir, ChatTemplate template, string prompt, int maxLength)
     {
-        Console.WriteLine();
-        Console.WriteLine($"== ORT GenAI on QNN EP (one-shot, template={template.Name}) ==");
-        Console.WriteLine($"Model dir: {modelDir}");
+        System.Console.WriteLine();
+        System.Console.WriteLine($"== ORT GenAI on QNN EP (one-shot, template={template.Name}) ==");
+        System.Console.WriteLine($"Model dir: {modelDir}");
 
         if (!Directory.Exists(modelDir))
         {
-            Console.WriteLine($"  Model directory does not exist: {modelDir}");
+            System.Console.WriteLine($"  Model directory does not exist: {modelDir}");
             return;
         }
 
         var (model, tokenizer, loadMs) = LoadQnnModel(modelDir);
         try
         {
-            Console.WriteLine($"  load: {loadMs} ms");
-            Console.WriteLine($"Prompt: {prompt}");
-            Console.Write("Response: ");
+            System.Console.WriteLine($"  load: {loadMs} ms");
+            System.Console.WriteLine($"Prompt: {prompt}");
+            System.Console.Write("Response: ");
 
             // Wrap with the active chat template so the response stops cleanly at
             // template-defined EOS instead of drifting into hallucinated follow-ups.
@@ -754,26 +754,26 @@ internal static partial class Program
                 if (lastToken == template.EosTokenId)
                 {
                     int final = guard.Flush();
-                    if (final != -1) { Console.Write(stream.Decode(final)); tokenCount++; }
+                    if (final != -1) { System.Console.Write(stream.Decode(final)); tokenCount++; }
                     break;
                 }
                 int toEmit = guard.Push(lastToken);
-                if (toEmit != -1) { Console.Write(stream.Decode(toEmit)); tokenCount++; }
+                if (toEmit != -1) { System.Console.Write(stream.Decode(toEmit)); tokenCount++; }
             }
             // IsDone() exit (max_length / non-EOS stop): drop any unbuffered tail through.
             {
                 int final = guard.Flush();
-                if (final != -1) { Console.Write(stream.Decode(final)); tokenCount++; }
+                if (final != -1) { System.Console.Write(stream.Decode(final)); tokenCount++; }
             }
             swGen.Stop();
 
-            Console.WriteLine();
+            System.Console.WriteLine();
             var totalMs = swGen.ElapsedMilliseconds;
             var decodeMs = totalMs - firstTokenMs;
             var tokPerSec = tokenCount > 1 && decodeMs > 0
                 ? (tokenCount - 1) * 1000.0 / decodeMs
                 : 0.0;
-            Console.WriteLine(
+            System.Console.WriteLine(
                 $"  {tokenCount} tokens, first-token={firstTokenMs} ms, decode={decodeMs} ms ({tokPerSec:0.0} tok/s)");
         }
         finally
@@ -794,7 +794,7 @@ internal static partial class Program
     // maxTokensPerTurn is a second belt-and-braces cap so a runaway turn can't drain
     // the session budget. The actual EOS id lives on `template`.
 
-    private static void RunChat(
+    private static async Task RunChat(
         string modelDir,
         ChatTemplate template,
         int maxLength,
@@ -805,26 +805,47 @@ internal static partial class Program
         double repetitionPenalty,
         int noRepeatNgramSize)
     {
-        Console.WriteLine();
-        Console.WriteLine($"== Chat on QNN HTP (template={template.Name}) ==");
-        Console.WriteLine($"Model dir: {modelDir}");
+        System.Console.WriteLine();
+        System.Console.WriteLine($"== Chat on QNN HTP (template={template.Name}) ==");
+        System.Console.WriteLine($"Model dir: {modelDir}");
 
         if (!Directory.Exists(modelDir))
         {
-            Console.WriteLine($"  Model directory does not exist: {modelDir}");
+            System.Console.WriteLine($"  Model directory does not exist: {modelDir}");
             return;
+        }
+
+        // VirtualTerminal probes DA1 to pick the math-rendering mode. We don't
+        // enter the alternate screen — chat REPL benefits from staying in the
+        // main scrollback so prior turns remain visible after /exit. The
+        // markdown post-render uses save-cursor / restore-cursor (\e[s / \e[u)
+        // around each streamed turn to replace the live token stream with the
+        // styled rendering, all within the primary screen buffer.
+        global::Console.Lib.BoxRenderMode? mathMode = null;
+        try
+        {
+            await using var probeTerm = new global::Console.Lib.VirtualTerminal();
+            await probeTerm.InitAsync();
+            mathMode = probeTerm.HasSixelSupport
+                ? global::Console.Lib.BoxRenderMode.Sixel
+                : global::Console.Lib.BoxRenderMode.Sextant;
+        }
+        catch
+        {
+            // Stdin/stdout redirected, no TTY, or some other probe failure —
+            // fall back to single-row Unicode math (mathMode stays null).
         }
 
         var (model, tokenizer, loadMs) = LoadQnnModel(modelDir);
         try
         {
-            Console.WriteLine($"  load: {loadMs} ms");
-            Console.WriteLine($"  max-length={maxLength}, max-tokens-per-turn={maxTokensPerTurn}, " +
+            System.Console.WriteLine($"  load: {loadMs} ms");
+            System.Console.WriteLine($"  max-length={maxLength}, max-tokens-per-turn={maxTokensPerTurn}, " +
                               $"temperature={temperature}, top-p={topP}, " +
                               $"rep-penalty={repetitionPenalty}, no-repeat-ngram={noRepeatNgramSize}");
-            Console.WriteLine("  /exit  /clear  /stats  /help");
-            Console.WriteLine("  Ctrl+C or Esc during generation = interrupt this turn. (PowerShell");
-            Console.WriteLine("   sometimes forwards Ctrl+C as termination instead — use Esc if so.)");
+            System.Console.WriteLine("  /exit  /clear  /stats  /help");
+            System.Console.WriteLine("  Ctrl+C or Esc during generation = interrupt this turn. (PowerShell");
+            System.Console.WriteLine("   sometimes forwards Ctrl+C as termination instead — use Esc if so.)");
 
             // Mid-generation interrupt: Ctrl+C cancels the current turn instead of killing
             // the process. Esc (polled between tokens) does the same. Both reset to false at
@@ -835,7 +856,7 @@ internal static partial class Program
                 e.Cancel = true;
                 interruptRequested = true;
             };
-            Console.CancelKeyPress += cancelHandler;
+            System.Console.CancelKeyPress += cancelHandler;
 
             GeneratorParams gparams = null!;
             Generator generator = null!;
@@ -871,9 +892,9 @@ internal static partial class Program
 
             while (true)
             {
-                Console.WriteLine();
-                Console.Write("you> ");
-                var line = Console.ReadLine();
+                System.Console.WriteLine();
+                System.Console.Write("you> ");
+                var line = System.Console.ReadLine();
                 if (line is null)
                 {
                     // Ctrl+C at the prompt: .NET's ReadLine returns null on Windows even
@@ -882,7 +903,7 @@ internal static partial class Program
                     if (interruptRequested)
                     {
                         interruptRequested = false;
-                        Console.WriteLine();
+                        System.Console.WriteLine();
                         continue;
                     }
                     break;
@@ -895,24 +916,24 @@ internal static partial class Program
                     break;
                 if (line.Equals("/help", StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.WriteLine("  /exit | /quit   leave");
-                    Console.WriteLine("  /clear          reset conversation (model stays loaded)");
-                    Console.WriteLine("  /stats          last-turn timing");
+                    System.Console.WriteLine("  /exit | /quit   leave");
+                    System.Console.WriteLine("  /clear          reset conversation (model stays loaded)");
+                    System.Console.WriteLine("  /stats          last-turn timing");
                     continue;
                 }
                 if (line.Equals("/clear", StringComparison.OrdinalIgnoreCase))
                 {
                     ResetSession();
-                    Console.WriteLine("  (conversation reset)");
+                    System.Console.WriteLine("  (conversation reset)");
                     continue;
                 }
                 if (line.Equals("/stats", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (lastTurnTokens == 0) { Console.WriteLine("  (no turns yet)"); }
+                    if (lastTurnTokens == 0) { System.Console.WriteLine("  (no turns yet)"); }
                     else
                     {
                         var tps = lastTurnTokens * 1000.0 / Math.Max(1, lastTurnMs);
-                        Console.WriteLine($"  last turn: {lastTurnTokens} tokens in {lastTurnMs} ms ({tps:0.0} tok/s)");
+                        System.Console.WriteLine($"  last turn: {lastTurnTokens} tokens in {lastTurnMs} ms ({tps:0.0} tok/s)");
                     }
                     continue;
                 }
@@ -932,12 +953,19 @@ internal static partial class Program
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"  append failed ({ex.GetType().Name}: {ex.Message}); resetting session");
+                    System.Console.WriteLine($"  append failed ({ex.GetType().Name}: {ex.Message}); resetting session");
                     ResetSession();
                     continue;
                 }
 
-                Console.Write("ai>  ");
+                System.Console.Write("ai>  ");
+                // Save cursor position right after the "ai>  " prompt. After the
+                // turn finishes we'll restore + clear-to-end-of-screen and replace
+                // the live token stream with the styled MarkdownRenderer output
+                // (fenced code, math, headings, lists, etc.). The save/restore
+                // round-trip lives in the primary screen buffer, so scrollback
+                // for prior turns stays intact.
+                System.Console.Write("\e[s");
                 interruptRequested = false;
                 var swTurn = Stopwatch.StartNew();
                 long firstTokenMs = 0;
@@ -947,6 +975,14 @@ internal static partial class Program
                 bool interrupted = false;
                 bool collapsed = false;
                 var guard = new StutterGuard();
+                var turnBuf = new StringBuilder();
+                // Local helper: write a token's decoded text to stdout AND mirror it
+                // into turnBuf so we have the full turn text for the post-render.
+                void Emit(string s)
+                {
+                    System.Console.Write(s);
+                    turnBuf.Append(s);
+                }
                 try
                 {
                     while (!generator.IsDone())
@@ -955,9 +991,9 @@ internal static partial class Program
                         // (below) is the dependable interrupt path.
                         if (interruptRequested) { interrupted = true; break; }
 
-                        if (Console.KeyAvailable)
+                        if (System.Console.KeyAvailable)
                         {
-                            var k = Console.ReadKey(intercept: true);
+                            var k = System.Console.ReadKey(intercept: true);
                             if (k.Key == ConsoleKey.Escape) { interrupted = true; break; }
                         }
 
@@ -975,7 +1011,7 @@ internal static partial class Program
                             int final = guard.Flush();
                             if (final != -1)
                             {
-                                Console.Write(stream.Decode(final));
+                                Emit(stream.Decode(final));
                                 tokensThisTurn++;
                             }
                             break;
@@ -987,7 +1023,7 @@ internal static partial class Program
                         if (toEmit == -1) continue;
 
                         var decoded = stream.Decode(toEmit);
-                        Console.Write(decoded);
+                        Emit(decoded);
                         tokensThisTurn++;
 
                         // Whitespace-collapse detector: small int4 models on QNN HTP can fall
@@ -1012,8 +1048,8 @@ internal static partial class Program
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine();
-                    Console.WriteLine($"  generation aborted: {ex.GetType().Name}: {ex.Message}");
+                    System.Console.WriteLine();
+                    System.Console.WriteLine($"  generation aborted: {ex.GetType().Name}: {ex.Message}");
                     ResetSession();
                     continue;
                 }
@@ -1025,15 +1061,47 @@ internal static partial class Program
                     int final = guard.Flush();
                     if (final != -1)
                     {
-                        Console.Write(stream.Decode(final));
+                        Emit(stream.Decode(final));
                         tokensThisTurn++;
                     }
                 }
                 swTurn.Stop();
-                Console.WriteLine();
+                // Replace the live token stream with the MarkdownRenderer output:
+                // restore cursor to right after "ai>  ", clear from there to end of
+                // screen, then emit a newline + the rendered lines. Headings, lists,
+                // bold, fenced code, and math all pick up their styled form. On any
+                // failure (renderer throws, terminal doesn't honour the save/restore
+                // escape, etc.) the catch falls back to the plain streamed output by
+                // just emitting a newline like the pre-Console.Lib code did.
+                if (turnBuf.Length > 0)
+                {
+                    try
+                    {
+                        int width;
+                        try { width = System.Console.WindowWidth; if (width <= 0) width = 80; }
+                        catch { width = 80; }
+                        System.Console.Write("\e[u\e[J");
+                        System.Console.WriteLine();
+                        var rendered = global::Console.Lib.MarkdownRenderer.RenderLines(
+                            turnBuf.ToString(), width,
+                            global::Console.Lib.ColorMode.TrueColor,
+                            theme: null,
+                            mathMode: mathMode);
+                        foreach (var renderedLine in rendered)
+                            System.Console.WriteLine(renderedLine);
+                    }
+                    catch
+                    {
+                        System.Console.WriteLine();
+                    }
+                }
+                else
+                {
+                    System.Console.WriteLine();
+                }
                 if (interrupted || collapsed)
                 {
-                    Console.WriteLine(collapsed
+                    System.Console.WriteLine(collapsed
                         ? "  (output collapsed into whitespace — aborted; try rephrasing or /clear)"
                         : "  (interrupted)");
                     // Close the assistant turn so the KV cache stays well-formed — an
@@ -1047,7 +1115,7 @@ internal static partial class Program
                 }
                 else if (capped)
                 {
-                    Console.WriteLine($"  (turn hit --max-tokens-per-turn={maxTokensPerTurn} cap)");
+                    System.Console.WriteLine($"  (turn hit --max-tokens-per-turn={maxTokensPerTurn} cap)");
                 }
 
                 lastTurnMs = swTurn.ElapsedMilliseconds;
@@ -1057,11 +1125,11 @@ internal static partial class Program
                 var decodeTps = tokensThisTurn > 1 && decodeMs > 0
                     ? (tokensThisTurn - 1) * 1000.0 / decodeMs
                     : 0.0;
-                Console.WriteLine(
+                System.Console.WriteLine(
                     $"  [turn {turnCount}: {tokensThisTurn} tok, prefill={firstTokenMs} ms, decode={decodeMs} ms ({decodeTps:0.0} tok/s)]");
             }
 
-            Console.CancelKeyPress -= cancelHandler;
+            System.Console.CancelKeyPress -= cancelHandler;
             generator?.Dispose();
             gparams?.Dispose();
         }
@@ -1157,25 +1225,25 @@ internal static partial class Program
         double repetitionPenalty,
         int maxTokensPerTurn)
     {
-        Console.WriteLine();
-        Console.WriteLine("== Bench (Qwen2.5 on QNN HTP) ==");
-        Console.WriteLine($"Model dir: {modelDir}");
+        System.Console.WriteLine();
+        System.Console.WriteLine("== Bench (Qwen2.5 on QNN HTP) ==");
+        System.Console.WriteLine($"Model dir: {modelDir}");
 
         if (!Directory.Exists(modelDir))
         {
-            Console.WriteLine($"  Model directory does not exist: {modelDir}");
+            System.Console.WriteLine($"  Model directory does not exist: {modelDir}");
             return;
         }
 
         string suiteJson;
         if (suitePath is null)
         {
-            Console.WriteLine("  Suite: <built-in default>");
+            System.Console.WriteLine("  Suite: <built-in default>");
             suiteJson = DefaultBenchSuite;
         }
         else
         {
-            Console.WriteLine($"  Suite: {suitePath}");
+            System.Console.WriteLine($"  Suite: {suitePath}");
             suiteJson = File.ReadAllText(suitePath);
         }
 
@@ -1187,20 +1255,20 @@ internal static partial class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  Failed to parse suite: {ex.GetType().Name}: {ex.Message}");
+            System.Console.WriteLine($"  Failed to parse suite: {ex.GetType().Name}: {ex.Message}");
             return;
         }
 
         var totalCells = suite.SystemPrompts.Length * suite.Tasks.Length;
-        Console.WriteLine(
+        System.Console.WriteLine(
             $"  System prompts: {suite.SystemPrompts.Length}, tasks: {suite.Tasks.Length}, cells: {totalCells}");
-        Console.WriteLine(
+        System.Console.WriteLine(
             $"  temperature={temperature}, top-p={topP}, rep-penalty={repetitionPenalty}, max-tokens-per-turn={maxTokensPerTurn}");
 
         var (model, tokenizer, loadMs) = LoadQnnModel(modelDir);
         try
         {
-            Console.WriteLine($"  load: {loadMs} ms");
+            System.Console.WriteLine($"  load: {loadMs} ms");
 
             var results = new List<BenchResult>(totalCells);
             var cellIdx = 0;
@@ -1211,8 +1279,8 @@ internal static partial class Program
                 foreach (var task in suite.Tasks)
                 {
                     cellIdx++;
-                    Console.WriteLine();
-                    Console.WriteLine($"-- [{cellIdx}/{totalCells}] task={task.Id} system={sys.Id} --");
+                    System.Console.WriteLine();
+                    System.Console.WriteLine($"-- [{cellIdx}/{totalCells}] task={task.Id} system={sys.Id} --");
 
                     var result = RunBenchCell(
                         model, tokenizer, template, sys, task,
@@ -1226,15 +1294,15 @@ internal static partial class Program
                     if (result.Heuristics.Collapsed) flags.Add("collapse");
                     var flagStr = flags.Count > 0 ? $" [{string.Join(",", flags)}]" : "";
 
-                    Console.WriteLine(
+                    System.Console.WriteLine(
                         $"  {result.Tokens} tok, prefill={result.PrefillMs} ms, decode={result.DecodeMs} ms " +
                         $"({result.DecodeTokPerSec:0.0} tok/s), stop={result.StopReason}{flagStr}");
                 }
             }
 
             swAll.Stop();
-            Console.WriteLine();
-            Console.WriteLine($"All cells done in {swAll.ElapsedMilliseconds / 1000.0:0.0} s.");
+            System.Console.WriteLine();
+            System.Console.WriteLine($"All cells done in {swAll.ElapsedMilliseconds / 1000.0:0.0} s.");
 
             Directory.CreateDirectory(outputDir);
             var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
@@ -1255,9 +1323,9 @@ internal static partial class Program
                 JsonSerializer.Serialize(output, BenchJsonContext.Default.BenchOutput));
             File.WriteAllText(mdPath, RenderBenchMarkdown(output, suite));
 
-            Console.WriteLine("Wrote:");
-            Console.WriteLine($"  {jsonPath}");
-            Console.WriteLine($"  {mdPath}");
+            System.Console.WriteLine("Wrote:");
+            System.Console.WriteLine($"  {jsonPath}");
+            System.Console.WriteLine($"  {mdPath}");
         }
         finally
         {
@@ -1456,40 +1524,40 @@ internal static partial class Program
 
     private static async Task DumpEpCatalogAsync()
     {
-        Console.WriteLine();
-        Console.WriteLine("== ONNX Runtime Execution Provider catalog ==");
+        System.Console.WriteLine();
+        System.Console.WriteLine("== ONNX Runtime Execution Provider catalog ==");
         try
         {
             var catalog = ExecutionProviderCatalog.GetDefault();
 
             var before = catalog.FindAllProviders().ToArray();
-            Console.WriteLine($"Known providers (pre-stage): {before.Length}");
+            System.Console.WriteLine($"Known providers (pre-stage): {before.Length}");
             foreach (var ep in before)
                 PrintEp(ep);
 
-            Console.WriteLine("Calling EnsureAndRegisterCertifiedAsync()…");
+            System.Console.WriteLine("Calling EnsureAndRegisterCertifiedAsync()…");
             var swEp = Stopwatch.StartNew();
             await catalog.EnsureAndRegisterCertifiedAsync();
             swEp.Stop();
-            Console.WriteLine($"  done in {swEp.ElapsedMilliseconds} ms");
+            System.Console.WriteLine($"  done in {swEp.ElapsedMilliseconds} ms");
 
             var after = catalog.FindAllProviders().ToArray();
-            Console.WriteLine($"Known providers (post-stage): {after.Length}");
+            System.Console.WriteLine($"Known providers (post-stage): {after.Length}");
             foreach (var ep in after)
                 PrintEp(ep);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  EP catalog probe failed: {ex.GetType().Name}: {ex.Message}");
+            System.Console.WriteLine($"  EP catalog probe failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         static void PrintEp(ExecutionProvider ep)
         {
-            Console.WriteLine($"  - {ep.Name,-20} ready={ep.ReadyState} cert={ep.Certification}");
+            System.Console.WriteLine($"  - {ep.Name,-20} ready={ep.ReadyState} cert={ep.Certification}");
             if (!string.IsNullOrEmpty(ep.LibraryPath))
-                Console.WriteLine($"      path: {ep.LibraryPath}");
+                System.Console.WriteLine($"      path: {ep.LibraryPath}");
             if (ep.PackageId is { FullName: { Length: > 0 } pkg })
-                Console.WriteLine($"      pkg:  {pkg}");
+                System.Console.WriteLine($"      pkg:  {pkg}");
         }
     }
 
@@ -1497,10 +1565,10 @@ internal static partial class Program
 
     private static void PrintMachineInfo()
     {
-        Console.WriteLine("== Machine ==");
-        Console.WriteLine($"OS:       {RuntimeInformation.OSDescription}");
-        Console.WriteLine($"Arch:     {RuntimeInformation.OSArchitecture} / process {RuntimeInformation.ProcessArchitecture}");
-        Console.WriteLine($".NET:     {RuntimeInformation.FrameworkDescription}");
-        Console.WriteLine($"Runtime:  {RuntimeInformation.RuntimeIdentifier}");
+        System.Console.WriteLine("== Machine ==");
+        System.Console.WriteLine($"OS:       {RuntimeInformation.OSDescription}");
+        System.Console.WriteLine($"Arch:     {RuntimeInformation.OSArchitecture} / process {RuntimeInformation.ProcessArchitecture}");
+        System.Console.WriteLine($".NET:     {RuntimeInformation.FrameworkDescription}");
+        System.Console.WriteLine($"Runtime:  {RuntimeInformation.RuntimeIdentifier}");
     }
 }
