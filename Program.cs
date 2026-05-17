@@ -409,6 +409,10 @@ internal static partial class Program
             int turnCount = 0;
             long lastTurnMs = 0;
             int lastTurnTokens = 0;
+            // Two consecutive AppendTokenSequences calls on a fresh Generator under OGA-QNN
+            // don't accumulate — only the last append takes effect (the bench bug). So we
+            // defer the system message and bundle it with the first user turn's prefill.
+            bool needsSystemPrefill = false;
 
             void ResetSession()
             {
@@ -426,14 +430,7 @@ internal static partial class Program
                     gparams.SetSearchOption("no_repeat_ngram_size", noRepeatNgramSize);
                 generator = new Generator(model, gparams);
                 turnCount = 0;
-
-                // System message, if any, gets prepended to the very first turn's prefill.
-                if (!string.IsNullOrWhiteSpace(system))
-                {
-                    var systemTokens = tokenizer.Encode(ChatMlSystemOpen + system + ChatMlSystemClose);
-                    try { generator.AppendTokenSequences(systemTokens); }
-                    finally { systemTokens.Dispose(); }
-                }
+                needsSystemPrefill = !string.IsNullOrWhiteSpace(system);
             }
 
             ResetSession();
@@ -487,10 +484,15 @@ internal static partial class Program
                     continue;
                 }
 
-                // Encode just this turn's user wrapper. The KV cache from prior turns is
-                // already inside `generator`; we only add the new tokens.
-                var turnPrompt = ChatMlUserOpen + line + ChatMlUserClose + ChatMlAssistantOpen;
+                // Encode just this turn's user wrapper, plus the system message if this is
+                // the first turn after ResetSession. The KV cache from prior turns is already
+                // inside `generator`; we only add new tokens.
+                var turnPrefix = needsSystemPrefill
+                    ? ChatMlSystemOpen + system + ChatMlSystemClose
+                    : "";
+                var turnPrompt = turnPrefix + ChatMlUserOpen + line + ChatMlUserClose + ChatMlAssistantOpen;
                 using var turnTokens = tokenizer.Encode(turnPrompt);
+                needsSystemPrefill = false;
 
                 try
                 {
@@ -823,14 +825,17 @@ internal static partial class Program
 
         using var generator = new Generator(model, gparams);
 
-        if (!string.IsNullOrWhiteSpace(sys.Text))
-        {
-            using var sysTokens = tokenizer.Encode(ChatMlSystemOpen + sys.Text + ChatMlSystemClose);
-            generator.AppendTokenSequences(sysTokens);
-        }
-        using var userTokens = tokenizer.Encode(
-            ChatMlUserOpen + task.Prompt + ChatMlUserClose + ChatMlAssistantOpen);
-        generator.AppendTokenSequences(userTokens);
+        // Encode system + user as one prefill and append once. Two back-to-back
+        // AppendTokenSequences calls on a fresh Generator under OGA-QNN appear not to
+        // accumulate cleanly (the first run produced wildly off-prompt outputs — model
+        // never saw the user message), so we materialize the whole ChatML wrapper in
+        // a single Encode/Append round.
+        var prefillText = (string.IsNullOrWhiteSpace(sys.Text)
+                ? ""
+                : ChatMlSystemOpen + sys.Text + ChatMlSystemClose)
+            + ChatMlUserOpen + task.Prompt + ChatMlUserClose + ChatMlAssistantOpen;
+        using var prefillTokens = tokenizer.Encode(prefillText);
+        generator.AppendTokenSequences(prefillTokens);
 
         using var stream = tokenizer.CreateStream();
         var sb = new StringBuilder();
