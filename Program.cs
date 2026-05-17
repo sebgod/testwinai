@@ -53,15 +53,23 @@ internal static partial class Program
     {
         var modelOption = new Option<DirectoryInfo>("--model", "-m")
         {
-            Description = "Directory containing an ORT-GenAI model bundle " +
-                          "(genai_config.json + ONNX + QNN context .bin shards + tokenizer).",
+            Description = "Models root dir (containing per-model subdirs like 'qwen2.5-7b'). " +
+                          "Or, for advanced use, a single bundle dir containing genai_config.json. " +
+                          $"Defaults to {DefaultModelsRoot}.",
+            DefaultValueFactory = _ => new DirectoryInfo(DefaultModelsRoot),
         };
 
-        var templateOption = new Option<string>("--template")
+        var thinkingOption = new Option<bool>("--thinking")
         {
-            Description = "Chat template: chatml (Qwen2.5 / Qwen3) | deepseek-r1 " +
-                          "(DeepSeek-R1-Distill-* family with <|User|>/<|Assistant|> markers).",
-            DefaultValueFactory = _ => "chatml",
+            Description = "Use the thinking model (DeepSeek-R1-Distill-Qwen-7B). Default is " +
+                          "the direct/non-thinking model (Qwen2.5-7B-Instruct).",
+            DefaultValueFactory = _ => false,
+        };
+
+        var templateOption = new Option<string?>("--template")
+        {
+            Description = "Override the chat template. Normally auto-detected from the bundle " +
+                          "(chatml for Qwen, deepseek-r1 for DeepSeek-R1-Distill).",
         };
 
         var maxLengthOption = new Option<int>("--max-length")
@@ -104,23 +112,28 @@ internal static partial class Program
         // generate
         var generateCmd = new Command("generate", "One-shot NPU inference on the supplied model bundle.")
         {
-            modelOption, templateOption, maxLengthOption, promptArgument,
+            modelOption, thinkingOption, templateOption, maxLengthOption, promptArgument,
         };
         generateCmd.SetAction(async (pr, _) =>
         {
-            var dir = pr.GetValue(modelOption);
-            if (dir is null) { Console.Error.WriteLine("--model is required."); return 1; }
+            var dir = pr.GetValue(modelOption)!;
             var promptParts = pr.GetValue(promptArgument) ?? Array.Empty<string>();
             var prompt = promptParts.Length == 0
                 ? "In one sentence, what is the Qualcomm Hexagon NPU and what does Windows use it for?"
                 : string.Join(' ', promptParts);
             await DiagnosticsHeaderAsync();
-            RunOneShot(
-                dir.FullName,
-                ChatTemplate.Parse(pr.GetValue(templateOption) ?? "chatml"),
-                prompt,
-                pr.GetValue(maxLengthOption));
-            return 0;
+            try
+            {
+                var (bundleDir, template) = ResolveModel(
+                    dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
+                RunOneShot(bundleDir, template, prompt, pr.GetValue(maxLengthOption));
+                return 0;
+            }
+            catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 1;
+            }
         });
 
         // chat
@@ -151,26 +164,35 @@ internal static partial class Program
         };
         var chatCmd = new Command("chat", "Interactive chat REPL on the NPU.")
         {
-            modelOption, templateOption, chatMaxOption, maxPerTurnOption,
+            modelOption, thinkingOption, templateOption, chatMaxOption, maxPerTurnOption,
             temperatureOption, topPOption, systemOption,
             repetitionPenaltyOption, noRepeatNgramOption,
         };
         chatCmd.SetAction(async (pr, _) =>
         {
-            var dir = pr.GetValue(modelOption);
-            if (dir is null) { Console.Error.WriteLine("--model is required."); return 1; }
+            var dir = pr.GetValue(modelOption)!;
             await DiagnosticsHeaderAsync();
-            RunChat(
-                dir.FullName,
-                ChatTemplate.Parse(pr.GetValue(templateOption) ?? "chatml"),
-                pr.GetValue(chatMaxOption),
-                pr.GetValue(maxPerTurnOption),
-                pr.GetValue(temperatureOption),
-                pr.GetValue(topPOption),
-                pr.GetValue(systemOption),
-                pr.GetValue(repetitionPenaltyOption),
-                pr.GetValue(noRepeatNgramOption));
-            return 0;
+            try
+            {
+                var (bundleDir, template) = ResolveModel(
+                    dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
+                RunChat(
+                    bundleDir,
+                    template,
+                    pr.GetValue(chatMaxOption),
+                    pr.GetValue(maxPerTurnOption),
+                    pr.GetValue(temperatureOption),
+                    pr.GetValue(topPOption),
+                    pr.GetValue(systemOption),
+                    pr.GetValue(repetitionPenaltyOption),
+                    pr.GetValue(noRepeatNgramOption));
+                return 0;
+            }
+            catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 1;
+            }
         });
 
         // bench
@@ -187,29 +209,51 @@ internal static partial class Program
             "bench",
             "Run a system-prompt × task suite and write JSON + markdown for offline scoring.")
         {
-            modelOption, templateOption, benchSuiteOption, benchOutputOption,
+            modelOption, thinkingOption, templateOption, benchSuiteOption, benchOutputOption,
             temperatureOption, topPOption, repetitionPenaltyOption, maxPerTurnOption,
         };
         benchCmd.SetAction(async (pr, _) =>
         {
-            var dir = pr.GetValue(modelOption);
-            if (dir is null) { Console.Error.WriteLine("--model is required."); return 1; }
+            var dir = pr.GetValue(modelOption)!;
             await DiagnosticsHeaderAsync();
-            RunBench(
-                dir.FullName,
-                ChatTemplate.Parse(pr.GetValue(templateOption) ?? "chatml"),
-                pr.GetValue(benchSuiteOption)?.FullName,
-                pr.GetValue(benchOutputOption)?.FullName ?? Environment.CurrentDirectory,
-                pr.GetValue(temperatureOption),
-                pr.GetValue(topPOption),
-                pr.GetValue(repetitionPenaltyOption),
-                pr.GetValue(maxPerTurnOption));
-            return 0;
+            try
+            {
+                var (bundleDir, template) = ResolveModel(
+                    dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
+                RunBench(
+                    bundleDir,
+                    template,
+                    pr.GetValue(benchSuiteOption)?.FullName,
+                    pr.GetValue(benchOutputOption)?.FullName ?? Environment.CurrentDirectory,
+                    pr.GetValue(temperatureOption),
+                    pr.GetValue(topPOption),
+                    pr.GetValue(repetitionPenaltyOption),
+                    pr.GetValue(maxPerTurnOption));
+                return 0;
+            }
+            catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 1;
+            }
+        });
+
+        // download
+        var downloadCmd = new Command(
+            "download",
+            "Download a known model bundle from HuggingFace and apply any required patches.")
+        {
+            modelOption, thinkingOption,
+        };
+        downloadCmd.SetAction(async (pr, _) =>
+        {
+            var root = pr.GetValue(modelOption)!;
+            return await DownloadAsync(root.FullName, pr.GetValue(thinkingOption));
         });
 
         var root = new RootCommand("testwinai — Windows AI / Snapdragon X Elite NPU exploration.")
         {
-            probeCmd, generateCmd, chatCmd, benchCmd,
+            probeCmd, generateCmd, chatCmd, benchCmd, downloadCmd,
         };
 
         // No subcommand → probe.
@@ -222,6 +266,117 @@ internal static partial class Program
         return root;
     }
 
+    // ---------- Download ----------
+    //
+    // Shells out to `hf download` (the HuggingFace CLI is a hard requirement; we don't
+    // want to reimplement HTTP-resume + xet here). After download, applies any patches
+    // declared in the model's registry entry.
+
+    private static async Task<int> DownloadAsync(string rootDir, bool thinking)
+    {
+        var entry = thinking ? DeepSeekEntry : QwenEntry;
+        var dest = Path.Combine(rootDir, entry.Slug);
+        Directory.CreateDirectory(rootDir);
+
+        Console.WriteLine($"== Download {entry.HfRepoId}");
+        Console.WriteLine($"   destination: {dest}");
+
+        var psi = new ProcessStartInfo("hf")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = false,
+        };
+        psi.ArgumentList.Add("download");
+        psi.ArgumentList.Add(entry.HfRepoId);
+        psi.ArgumentList.Add("--local-dir");
+        psi.ArgumentList.Add(dest);
+
+        Process p;
+        try
+        {
+            p = Process.Start(psi) ?? throw new InvalidOperationException("hf failed to start");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  failed to launch `hf`: {ex.Message}");
+            Console.Error.WriteLine("  Install with: pip install huggingface_hub");
+            return 1;
+        }
+        await p.WaitForExitAsync();
+        if (p.ExitCode != 0)
+        {
+            Console.Error.WriteLine($"  hf exited with code {p.ExitCode}");
+            return p.ExitCode;
+        }
+
+        foreach (var patch in entry.Patches)
+        {
+            Console.WriteLine($"   patch: {patch}");
+            ApplyPatch(dest, patch);
+        }
+
+        Console.WriteLine($"   ready: testwinai chat{(thinking ? " --thinking" : "")}");
+        return 0;
+    }
+
+    private static void ApplyPatch(string bundleDir, string name)
+    {
+        switch (name)
+        {
+            case "strip-backend-path": StripBackendPath(bundleDir); break;
+            default: throw new ArgumentException($"unknown patch: {name}");
+        }
+    }
+
+    // The DeepSeek bundle pins backend_path: QnnHtp.dll on the prompt-processor /
+    // token-generator stages, which routes the session to the OGA-bundled QNN EP.
+    // That EP can't load (its co-located onnxruntime.dll isn't copied — see CLAUDE.md),
+    // and the system-staged EP doesn't claim a session that's been explicitly pinned
+    // elsewhere. Result: load throws "Could not find an implementation for EPContext(1)".
+    // Stripping the key lets the system EP take over.
+    //
+    // Idempotent: skips when a .orig backup already exists alongside the config.
+    private static void StripBackendPath(string bundleDir)
+    {
+        var path = Path.Combine(bundleDir, "genai_config.json");
+        var orig = path + ".orig";
+        if (File.Exists(orig))
+        {
+            Console.WriteLine("     (already patched — .orig exists)");
+            return;
+        }
+        var raw = File.ReadAllText(path);
+        var root = System.Text.Json.Nodes.JsonNode.Parse(raw)!.AsObject();
+        var pipeline = root["model"]?["decoder"]?["pipeline"]?.AsArray();
+        if (pipeline is null || pipeline.Count == 0)
+        {
+            Console.WriteLine("     (no pipeline in genai_config.json; nothing to do)");
+            return;
+        }
+        var stages = pipeline[0]!.AsObject();
+        int stripped = 0;
+        foreach (var kv in stages)
+        {
+            var so = kv.Value?["session_options"]?.AsObject();
+            var po = so?["provider_options"]?.AsArray();
+            if (po is null) continue;
+            foreach (var poEntry in po)
+            {
+                var epWrap = poEntry?.AsObject();
+                if (epWrap is null) continue;
+                foreach (var ep in epWrap)
+                {
+                    var opts = ep.Value?.AsObject();
+                    if (opts is not null && opts.Remove("backend_path"))
+                        stripped++;
+                }
+            }
+        }
+        File.WriteAllText(orig, raw);
+        File.WriteAllText(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine($"     stripped backend_path from {stripped} stage(s); backup at {Path.GetFileName(orig)}");
+    }
+
     // ---------- Probe (no model required) ----------
 
     private static async Task ProbeAsync()
@@ -232,9 +387,12 @@ internal static partial class Program
 
         Console.WriteLine();
         Console.WriteLine("(tips:");
-        Console.WriteLine("    testwinai generate --model <dir> \"<prompt>\"   one-shot NPU inference");
-        Console.WriteLine("    testwinai chat     --model <dir>              multi-turn REPL with KV-cache");
-        Console.WriteLine("    testwinai bench    --model <dir>              system-prompt × task suite)");
+        Console.WriteLine("    testwinai download                fetch the default Qwen2.5-7B bundle");
+        Console.WriteLine("    testwinai download --thinking     fetch the DeepSeek-R1-Distill-7B bundle");
+        Console.WriteLine("    testwinai generate \"<prompt>\"     one-shot inference (--thinking for R1)");
+        Console.WriteLine("    testwinai chat                    multi-turn REPL (--thinking for R1)");
+        Console.WriteLine("    testwinai bench                   system-prompt × task suite");
+        Console.WriteLine($"   --model defaults to {DefaultModelsRoot} (override for a custom location))");
     }
 
     private static async Task DiagnosticsHeaderAsync()
@@ -325,6 +483,93 @@ internal static partial class Program
             _ => throw new ArgumentException($"unknown --template '{name}' (expected chatml | deepseek-r1)")
         };
     }
+
+    // ---------- Model registry ----------
+    //
+    // Two known QNN ORT-GenAI bundles. The registry maps a slug (also the on-disk
+    // subdir name) to its HF repo + the chat template the model expects + any
+    // post-download patches needed before OGA can load it. Adding a third model is
+    // an entry in KnownModels plus, if needed, a new case in ApplyPatch.
+
+    private sealed record ModelEntry(
+        string Slug,
+        string HfRepoId,
+        ChatTemplate Template,
+        string[] Patches);
+
+    private static readonly ModelEntry QwenEntry = new(
+        Slug: "qwen2.5-7b",
+        HfRepoId: "llmware/qwen2.5-7b-instruct-onnx-qnn",
+        Template: ChatTemplate.ChatMl,
+        Patches: Array.Empty<string>());
+
+    private static readonly ModelEntry DeepSeekEntry = new(
+        Slug: "deepseek-r1-7b",
+        HfRepoId: "llmware/deepseek-r1-distill-qwen-7b-onnx-qnn",
+        Template: ChatTemplate.DeepSeekR1,
+        // 'backend_path: QnnHtp.dll' on the prompt-processor / token-generator
+        // session_options blocks the system QNN EP from claiming the session.
+        Patches: new[] { "strip-backend-path" });
+
+    private static readonly ModelEntry[] KnownModels = { QwenEntry, DeepSeekEntry };
+
+    // Resolution rule for the --model path:
+    //   - if the path contains a genai_config.json: treat as a single bundle dir.
+    //   - otherwise: treat as a root dir; subdir is QwenEntry.Slug normally,
+    //     DeepSeekEntry.Slug when --thinking is set.
+    // Template override (--template) wins over both auto-detection and the registry.
+    private static (string bundleDir, ChatTemplate template) ResolveModel(
+        string path, bool thinking, string? templateOverride)
+    {
+        if (File.Exists(Path.Combine(path, "genai_config.json")))
+        {
+            var tmpl = templateOverride is not null
+                ? ChatTemplate.Parse(templateOverride)
+                : DetectTemplate(path) ?? ChatTemplate.ChatMl;
+            return (path, tmpl);
+        }
+
+        var entry = thinking ? DeepSeekEntry : QwenEntry;
+        var subDir = Path.Combine(path, entry.Slug);
+        if (!Directory.Exists(subDir))
+        {
+            throw new DirectoryNotFoundException(
+                $"Model subdir not found: {subDir}\n" +
+                $"Run `testwinai download{(thinking ? " --thinking" : "")} --model \"{path}\"` first, " +
+                $"or pass --model with a path that contains genai_config.json directly.");
+        }
+        var resolved = templateOverride is not null
+            ? ChatTemplate.Parse(templateOverride)
+            : DetectTemplate(subDir) ?? entry.Template;
+        return (subDir, resolved);
+    }
+
+    // Cheap template sniff: tokenizer_config.json's bos_token tells us which family.
+    // Returns null when ambiguous (caller falls back to the registry default).
+    private static ChatTemplate? DetectTemplate(string bundleDir)
+    {
+        var tcPath = Path.Combine(bundleDir, "tokenizer_config.json");
+        if (!File.Exists(tcPath)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(tcPath));
+            if (!doc.RootElement.TryGetProperty("bos_token", out var bos)) return null;
+            string? bosStr = bos.ValueKind switch
+            {
+                JsonValueKind.String => bos.GetString(),
+                JsonValueKind.Object => bos.TryGetProperty("content", out var c) ? c.GetString() : null,
+                _ => null,
+            };
+            // DeepSeek-R1-Distill uses U+2581 (▁) in its BOS string.
+            if (bosStr is not null && bosStr.Contains("begin▁of▁sentence")) return ChatTemplate.DeepSeekR1;
+            return ChatTemplate.ChatMl;
+        }
+        catch { return null; }
+    }
+
+    // Default root path: where `download` writes bundles and where the run commands look.
+    // Matches the C:/temp convention already used on this box for the existing bundles.
+    private const string DefaultModelsRoot = @"C:\temp\testwinai-models";
 
     // Trailing-duplicate-token suppressor. The int4-quantized lm_head on these QNN
     // bundles occasionally ranks a "duplicate of the previous token" just above EOS at
