@@ -53,8 +53,15 @@ internal static partial class Program
     {
         var modelOption = new Option<DirectoryInfo>("--model", "-m")
         {
-            Description = "Directory containing an ORT-GenAI Qwen2.5 model bundle " +
+            Description = "Directory containing an ORT-GenAI model bundle " +
                           "(genai_config.json + ONNX + QNN context .bin shards + tokenizer).",
+        };
+
+        var templateOption = new Option<string>("--template")
+        {
+            Description = "Chat template: chatml (Qwen2.5 / Qwen3) | deepseek-r1 " +
+                          "(DeepSeek-R1-Distill-* family with <|User|>/<|Assistant|> markers).",
+            DefaultValueFactory = _ => "chatml",
         };
 
         var maxLengthOption = new Option<int>("--max-length")
@@ -97,7 +104,7 @@ internal static partial class Program
         // generate
         var generateCmd = new Command("generate", "One-shot NPU inference on the supplied model bundle.")
         {
-            modelOption, maxLengthOption, promptArgument,
+            modelOption, templateOption, maxLengthOption, promptArgument,
         };
         generateCmd.SetAction(async (pr, _) =>
         {
@@ -108,7 +115,11 @@ internal static partial class Program
                 ? "In one sentence, what is the Qualcomm Hexagon NPU and what does Windows use it for?"
                 : string.Join(' ', promptParts);
             await DiagnosticsHeaderAsync();
-            RunOneShot(dir.FullName, prompt, pr.GetValue(maxLengthOption));
+            RunOneShot(
+                dir.FullName,
+                ChatTemplate.Parse(pr.GetValue(templateOption) ?? "chatml"),
+                prompt,
+                pr.GetValue(maxLengthOption));
             return 0;
         });
 
@@ -138,9 +149,10 @@ internal static partial class Program
                           "Prevents runaway generation if EOS gets suppressed.",
             DefaultValueFactory = _ => 1024,
         };
-        var chatCmd = new Command("chat", "Interactive Qwen2.5 chat REPL on the NPU.")
+        var chatCmd = new Command("chat", "Interactive chat REPL on the NPU.")
         {
-            modelOption, chatMaxOption, maxPerTurnOption, temperatureOption, topPOption, systemOption,
+            modelOption, templateOption, chatMaxOption, maxPerTurnOption,
+            temperatureOption, topPOption, systemOption,
             repetitionPenaltyOption, noRepeatNgramOption,
         };
         chatCmd.SetAction(async (pr, _) =>
@@ -150,6 +162,7 @@ internal static partial class Program
             await DiagnosticsHeaderAsync();
             RunChat(
                 dir.FullName,
+                ChatTemplate.Parse(pr.GetValue(templateOption) ?? "chatml"),
                 pr.GetValue(chatMaxOption),
                 pr.GetValue(maxPerTurnOption),
                 pr.GetValue(temperatureOption),
@@ -174,7 +187,7 @@ internal static partial class Program
             "bench",
             "Run a system-prompt × task suite and write JSON + markdown for offline scoring.")
         {
-            modelOption, benchSuiteOption, benchOutputOption,
+            modelOption, templateOption, benchSuiteOption, benchOutputOption,
             temperatureOption, topPOption, repetitionPenaltyOption, maxPerTurnOption,
         };
         benchCmd.SetAction(async (pr, _) =>
@@ -184,6 +197,7 @@ internal static partial class Program
             await DiagnosticsHeaderAsync();
             RunBench(
                 dir.FullName,
+                ChatTemplate.Parse(pr.GetValue(templateOption) ?? "chatml"),
                 pr.GetValue(benchSuiteOption)?.FullName,
                 pr.GetValue(benchOutputOption)?.FullName ?? Environment.CurrentDirectory,
                 pr.GetValue(temperatureOption),
@@ -261,13 +275,56 @@ internal static partial class Program
     // the Hexagon NPU. The model MUST be QNN-prepared — FP32/FP16 ONNX will silently fall
     // back to CPU on a Snapdragon X target. See CLAUDE.md for the model bundle expectations.
 
-    // ChatML tokens, hard-coded since the format is stable across Qwen2 / Qwen2.5 / Qwen3.
-    private const string ChatMlUserOpen = "<|im_start|>user\n";
-    private const string ChatMlUserClose = "<|im_end|>\n";
-    private const string ChatMlAssistantOpen = "<|im_start|>assistant\n";
-    private const string ChatMlAssistantClose = "<|im_end|>\n";
-    private const string ChatMlSystemOpen = "<|im_start|>system\n";
-    private const string ChatMlSystemClose = "<|im_end|>\n";
+    // Chat template plus its EOS token id. ChatML covers Qwen2/2.5/3-Instruct; the
+    // DeepSeek-R1 family uses its own <|User|>/<|Assistant|> markers and a different EOS.
+    private sealed record ChatTemplate(
+        string Name,
+        string SystemOpen, string SystemClose,
+        string UserOpen, string UserClose,
+        string AssistantOpen, string AssistantClose,
+        int EosTokenId)
+    {
+        // Build a fresh single-turn prefill (system message folded in if present).
+        // Caller appends the result once via AppendTokenSequences.
+        public string BuildPrefill(string? systemText, string userText)
+        {
+            var sys = string.IsNullOrWhiteSpace(systemText)
+                ? ""
+                : SystemOpen + systemText + SystemClose;
+            return sys + UserOpen + userText + UserClose + AssistantOpen;
+        }
+
+        public static readonly ChatTemplate ChatMl = new(
+            Name: "chatml",
+            SystemOpen: "<|im_start|>system\n", SystemClose: "<|im_end|>\n",
+            UserOpen: "<|im_start|>user\n",   UserClose: "<|im_end|>\n",
+            AssistantOpen: "<|im_start|>assistant\n", AssistantClose: "<|im_end|>\n",
+            // <|im_end|> in Qwen2.5 vocab.
+            EosTokenId: 151645);
+
+        // DeepSeek-R1-Distill-* template. The special-token strings use fullwidth pipes
+        // (U+FF5C ｜) and the BPE lower-one-eighth-block (U+2581 ▁), NOT ASCII | and _.
+        // No dedicated "system" slot — system text is injected bare between BOS and the
+        // first user marker. The tokenizer adds BOS automatically when add_bos_token=true
+        // (it is for these bundles), so we do not emit <｜begin▁of▁sentence｜> ourselves.
+        // Multi-turn under this template needs care: re-encoding would re-add BOS, so
+        // start with one-shot generate and bench (single prefill per cell).
+        public static readonly ChatTemplate DeepSeekR1 = new(
+            Name: "deepseek-r1",
+            SystemOpen: "", SystemClose: "",
+            UserOpen: "<｜User｜>", UserClose: "",
+            AssistantOpen: "<｜Assistant｜>",
+            AssistantClose: "<｜end▁of▁sentence｜>",
+            // <｜end▁of▁sentence｜> in DeepSeek-R1-Distill-Qwen tokenizer.
+            EosTokenId: 151643);
+
+        public static ChatTemplate Parse(string name) => name.ToLowerInvariant() switch
+        {
+            "chatml" => ChatMl,
+            "deepseek-r1" or "deepseek" => DeepSeekR1,
+            _ => throw new ArgumentException($"unknown --template '{name}' (expected chatml | deepseek-r1)")
+        };
+    }
 
     // Load model + tokenizer for any QNN ORT-GenAI bundle. We force QNN/HTP even though
     // genai_config.json already declares it — keeps behavior deterministic across bundles.
@@ -288,10 +345,10 @@ internal static partial class Program
         return (model, tokenizer, sw.ElapsedMilliseconds);
     }
 
-    private static void RunOneShot(string modelDir, string prompt, int maxLength)
+    private static void RunOneShot(string modelDir, ChatTemplate template, string prompt, int maxLength)
     {
         Console.WriteLine();
-        Console.WriteLine("== ORT GenAI on QNN EP (one-shot) ==");
+        Console.WriteLine($"== ORT GenAI on QNN EP (one-shot, template={template.Name}) ==");
         Console.WriteLine($"Model dir: {modelDir}");
 
         if (!Directory.Exists(modelDir))
@@ -307,9 +364,9 @@ internal static partial class Program
             Console.WriteLine($"Prompt: {prompt}");
             Console.Write("Response: ");
 
-            // Wrap in ChatML so the response stops cleanly at <|im_end|>
-            // instead of drifting into hallucinated "Instruction 2 / Follow-up" sections.
-            var wrapped = ChatMlUserOpen + prompt + ChatMlUserClose + ChatMlAssistantOpen;
+            // Wrap with the active chat template so the response stops cleanly at
+            // template-defined EOS instead of drifting into hallucinated follow-ups.
+            var wrapped = template.BuildPrefill(systemText: null, userText: prompt);
             using var inputTokens = tokenizer.Encode(wrapped);
 
             using var generatorParams = new GeneratorParams(model);
@@ -357,13 +414,14 @@ internal static partial class Program
     //
     // Slash commands: /exit /quit /clear /stats /help
 
-    // Qwen2.5 <|im_end|>. Defensive hard-stop: when repetition_penalty suppresses it enough
-    // that OGA's IsDone() doesn't trigger, we bail on this id ourselves. maxTokensPerTurn
-    // is a second belt-and-braces cap so a runaway turn can't drain the session budget.
-    private const int QwenImEndToken = 151645;
+    // Defensive hard-stop: when repetition_penalty suppresses the model's EOS enough
+    // that OGA's IsDone() doesn't trigger, we bail on the template's EOS id ourselves.
+    // maxTokensPerTurn is a second belt-and-braces cap so a runaway turn can't drain
+    // the session budget. The actual EOS id lives on `template`.
 
     private static void RunChat(
         string modelDir,
+        ChatTemplate template,
         int maxLength,
         int maxTokensPerTurn,
         double temperature,
@@ -373,7 +431,7 @@ internal static partial class Program
         int noRepeatNgramSize)
     {
         Console.WriteLine();
-        Console.WriteLine("== Chat (Qwen2.5 on QNN HTP) ==");
+        Console.WriteLine($"== Chat on QNN HTP (template={template.Name}) ==");
         Console.WriteLine($"Model dir: {modelDir}");
 
         if (!Directory.Exists(modelDir))
@@ -487,10 +545,9 @@ internal static partial class Program
                 // Encode just this turn's user wrapper, plus the system message if this is
                 // the first turn after ResetSession. The KV cache from prior turns is already
                 // inside `generator`; we only add new tokens.
-                var turnPrefix = needsSystemPrefill
-                    ? ChatMlSystemOpen + system + ChatMlSystemClose
-                    : "";
-                var turnPrompt = turnPrefix + ChatMlUserOpen + line + ChatMlUserClose + ChatMlAssistantOpen;
+                var turnPrompt = template.BuildPrefill(
+                    needsSystemPrefill ? system : null,
+                    line);
                 using var turnTokens = tokenizer.Encode(turnPrompt);
                 needsSystemPrefill = false;
 
@@ -535,8 +592,8 @@ internal static partial class Program
                         var sequence = generator.GetSequence(0);
                         int lastToken = sequence[sequence.Length - 1];
 
-                        // Defensive EOS — see QwenImEndToken doc above.
-                        if (lastToken == QwenImEndToken)
+                        // Defensive EOS — see RunChat doc above.
+                        if (lastToken == template.EosTokenId)
                             break;
 
                         var decoded = stream.Decode(lastToken);
@@ -581,7 +638,7 @@ internal static partial class Program
                     // unterminated <|im_start|>assistant confuses the next user turn.
                     try
                     {
-                        using var closeTokens = tokenizer.Encode(ChatMlAssistantClose);
+                        using var closeTokens = tokenizer.Encode(template.AssistantClose);
                         generator.AppendTokenSequences(closeTokens);
                     }
                     catch { /* if append fails, /clear is the user's recovery */ }
@@ -689,6 +746,7 @@ internal static partial class Program
 
     private static void RunBench(
         string modelDir,
+        ChatTemplate template,
         string? suitePath,
         string outputDir,
         double temperature,
@@ -754,7 +812,7 @@ internal static partial class Program
                     Console.WriteLine($"-- [{cellIdx}/{totalCells}] task={task.Id} system={sys.Id} --");
 
                     var result = RunBenchCell(
-                        model, tokenizer, sys, task,
+                        model, tokenizer, template, sys, task,
                         temperature, topP, repetitionPenalty, maxTokensPerTurn);
                     results.Add(result);
 
@@ -808,6 +866,7 @@ internal static partial class Program
     private static BenchResult RunBenchCell(
         Model model,
         Tokenizer tokenizer,
+        ChatTemplate template,
         BenchSystemPrompt sys,
         BenchTask task,
         double temperature,
@@ -828,12 +887,9 @@ internal static partial class Program
         // Encode system + user as one prefill and append once. Two back-to-back
         // AppendTokenSequences calls on a fresh Generator under OGA-QNN appear not to
         // accumulate cleanly (the first run produced wildly off-prompt outputs — model
-        // never saw the user message), so we materialize the whole ChatML wrapper in
+        // never saw the user message), so we materialize the whole template wrapper in
         // a single Encode/Append round.
-        var prefillText = (string.IsNullOrWhiteSpace(sys.Text)
-                ? ""
-                : ChatMlSystemOpen + sys.Text + ChatMlSystemClose)
-            + ChatMlUserOpen + task.Prompt + ChatMlUserClose + ChatMlAssistantOpen;
+        var prefillText = template.BuildPrefill(sys.Text, task.Prompt);
         using var prefillTokens = tokenizer.Encode(prefillText);
         generator.AppendTokenSequences(prefillTokens);
 
@@ -856,7 +912,7 @@ internal static partial class Program
 
                 var seq = generator.GetSequence(0);
                 int lastToken = seq[seq.Length - 1];
-                if (lastToken == QwenImEndToken) break;
+                if (lastToken == template.EosTokenId) break;
 
                 var decoded = stream.Decode(lastToken);
                 sb.Append(decoded);
