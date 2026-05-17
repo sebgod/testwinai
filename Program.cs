@@ -72,10 +72,11 @@ internal static partial class Program
                           "(chatml for Qwen, deepseek-r1 for DeepSeek-R1-Distill).",
         };
 
-        var maxLengthOption = new Option<int>("--max-length")
+        var maxLengthOption = new Option<int?>("--max-length")
         {
-            Description = "Generation cap (total sequence length including prompt + reply).",
-            DefaultValueFactory = _ => 1024,
+            Description = "Generation cap (total sequence length including prompt + reply). " +
+                          "Defaults to the template's DefaultMaxTokensPerTurn (chatml=1024, " +
+                          "deepseek-r1=8192 — R1's <think> block needs room).",
         };
 
         var temperatureOption = new Option<double>("--temperature")
@@ -125,7 +126,8 @@ internal static partial class Program
             {
                 var (bundleDir, template) = ResolveModel(
                     dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
-                RunOneShot(bundleDir, template, prompt, pr.GetValue(maxLengthOption));
+                var maxLen = pr.GetValue(maxLengthOption) ?? template.DefaultMaxTokensPerTurn;
+                RunOneShot(bundleDir, template, prompt, maxLen);
                 return 0;
             }
             catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
@@ -136,10 +138,11 @@ internal static partial class Program
         });
 
         // chat
-        var chatMaxOption = new Option<int>("--max-length")
+        var chatMaxOption = new Option<int?>("--max-length")
         {
-            Description = "Per-session cap on total tokens (prompt history + replies).",
-            DefaultValueFactory = _ => 4096,
+            Description = "Per-session cap on total tokens (prompt history + replies). " +
+                          "Defaults to the template's DefaultSessionMaxLength " +
+                          "(chatml=4096, deepseek-r1=16384).",
         };
         var repetitionPenaltyOption = new Option<double>("--repetition-penalty")
         {
@@ -155,11 +158,12 @@ internal static partial class Program
                           "(<|im_end|>\\n<|im_start|>user\\n etc.) from reappearing and breaks multi-turn stopping.",
             DefaultValueFactory = _ => 0,
         };
-        var maxPerTurnOption = new Option<int>("--max-tokens-per-turn")
+        var maxPerTurnOption = new Option<int?>("--max-tokens-per-turn")
         {
             Description = "Hard cap on tokens generated in a single assistant turn. " +
-                          "Prevents runaway generation if EOS gets suppressed.",
-            DefaultValueFactory = _ => 1024,
+                          "Prevents runaway generation if EOS gets suppressed. " +
+                          "Defaults to the template's DefaultMaxTokensPerTurn " +
+                          "(chatml=1024, deepseek-r1=8192).",
         };
         var chatCmd = new Command("chat", "Interactive chat REPL on the NPU.")
         {
@@ -175,15 +179,17 @@ internal static partial class Program
             {
                 var (bundleDir, template) = ResolveModel(
                     dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
-                // null = user didn't pass --system, fall back to template default.
-                // "" = user explicitly disabled, honor as-is.
+                // null = user didn't pass the option, fall back to the template default.
+                // "" or any explicit value (including 0) always wins.
                 var explicitSystem = pr.GetValue(systemOption);
                 var system = explicitSystem ?? template.DefaultSystemPrompt;
+                var chatMax = pr.GetValue(chatMaxOption) ?? template.DefaultSessionMaxLength;
+                var perTurn = pr.GetValue(maxPerTurnOption) ?? template.DefaultMaxTokensPerTurn;
                 RunChat(
                     bundleDir,
                     template,
-                    pr.GetValue(chatMaxOption),
-                    pr.GetValue(maxPerTurnOption),
+                    chatMax,
+                    perTurn,
                     pr.GetValue(temperatureOption),
                     pr.GetValue(topPOption),
                     system,
@@ -223,6 +229,7 @@ internal static partial class Program
             {
                 var (bundleDir, template) = ResolveModel(
                     dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
+                var perTurn = pr.GetValue(maxPerTurnOption) ?? template.DefaultMaxTokensPerTurn;
                 RunBench(
                     bundleDir,
                     template,
@@ -231,7 +238,7 @@ internal static partial class Program
                     pr.GetValue(temperatureOption),
                     pr.GetValue(topPOption),
                     pr.GetValue(repetitionPenaltyOption),
-                    pr.GetValue(maxPerTurnOption));
+                    perTurn);
                 return 0;
             }
             catch (Exception ex) when (ex is DirectoryNotFoundException or ArgumentException)
@@ -446,7 +453,13 @@ internal static partial class Program
         int EosTokenId,
         // Per-family default system prompt for chat. Used when --system isn't passed
         // on the CLI; an explicit --system (including --system "") always wins.
-        string DefaultSystemPrompt)
+        string DefaultSystemPrompt,
+        // Per-family generation budgets. R1-Distill emits a <think> block of 200–4000
+        // tokens before its actual answer, so reasoning bundles get a much larger cap
+        // than ChatML. Used when --max-length / --max-tokens-per-turn aren't passed.
+        // KV-cache cost scales linearly with max-length, so leave Qwen's small.
+        int DefaultMaxTokensPerTurn,
+        int DefaultSessionMaxLength)
     {
         // Build a fresh single-turn prefill (system message folded in if present).
         // Caller appends the result once via AppendTokenSequences.
@@ -467,7 +480,9 @@ internal static partial class Program
             EosTokenId: 151645,
             DefaultSystemPrompt:
                 "You are a concise assistant. Keep replies focused. " +
-                "Avoid unsolicited follow-up questions and don't restate the prompt.");
+                "Avoid unsolicited follow-up questions and don't restate the prompt.",
+            DefaultMaxTokensPerTurn: 1024,
+            DefaultSessionMaxLength: 4096);
 
         // DeepSeek-R1-Distill-* template. The special-token strings use fullwidth pipes
         // (U+FF5C ｜) and the BPE lower-one-eighth-block (U+2581 ▁), NOT ASCII | and _.
@@ -489,7 +504,13 @@ internal static partial class Program
             // reasoning regardless of any system message, and prefacing the chat
             // with a "be concise" instruction has no measurable effect on output
             // length or format. Leaving this empty by default per DeepSeek's docs.
-            DefaultSystemPrompt: "");
+            DefaultSystemPrompt: "",
+            // <think> + final answer can run 1k–4k tokens on a hard math problem;
+            // the per-turn cap needs to be well past that. Session cap is per-turn
+            // × ~2 to allow at least one follow-up turn before exhausting the KV
+            // cache. Override with --max-tokens-per-turn / --max-length if needed.
+            DefaultMaxTokensPerTurn: 8192,
+            DefaultSessionMaxLength: 16384);
 
         public static ChatTemplate Parse(string name) => name.ToLowerInvariant() switch
         {
