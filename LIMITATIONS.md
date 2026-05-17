@@ -52,6 +52,7 @@ itself, not a cosmetic artifact).
 | Issue | Example | Notes |
 |---|---|---|
 | Qwen 2.5 7B knowledge ranking | "Top 3 populous continents" → Asia / Africa / **N. America** | Europe (~745M) > N. America (~600M), but the model consistently picks NA. Training-data artifact. **DeepSeek-R1 fixes this** — it reasons through the ranking and gets Europe right. |
+| Qwen 2.5 7B self-contradiction on primality | "Is 131 prime?" → "divisible by 1, 131, and no other numbers, but it is not a prime number" | Same response volunteers the correct divisor set then concludes the wrong way. Pattern-matched answer; the chat-style decoder doesn't notice the logical contradiction inside its own reply. **DeepSeek-R1 fixes this** — trial-divides by primes ≤ √131 and correctly concludes prime. New `prime` task in the default bench suite. |
 | DeepSeek-R1 verbosity | `<think>` blocks of 100–400 tokens before every answer | Inherent to the R1-distill recipe. Trades brevity for reasoning quality. |
 | DeepSeek-R1 number recall | "Asia ~1.4 billion" (real: ~4.7B) | Reasoning-based but doesn't override miscalibrated training-time knowledge. |
 | Hexagon HTP is not general-purpose | No CUDA-style kernel authoring | Fixed-function tensor accelerator. Custom kernels would need Qualcomm's QNN SDK with HTP op authoring. |

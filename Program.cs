@@ -1062,6 +1062,7 @@ internal static partial class Program
         { "id": "python-install", "prompt": "How do I install Python on Windows?" },
         { "id": "translate-fr",   "prompt": "Translate 'hello world' to French." },
         { "id": "math",           "prompt": "What is 17 multiplied by 23?" },
+        { "id": "prime",          "prompt": "Is 131 prime? Answer yes or no, then justify in one sentence." },
         { "id": "hamlet",         "prompt": "Summarize the plot of Hamlet in one sentence." }
       ]
     }
