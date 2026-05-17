@@ -326,6 +326,45 @@ internal static partial class Program
         };
     }
 
+    // Trailing-duplicate-token suppressor. The int4-quantized lm_head on these QNN
+    // bundles occasionally ranks a "duplicate of the previous token" just above EOS at
+    // the end of a short answer ("Yes" → "Yes..", "monde" → "monde monde", "391" → "3911",
+    // "]" → "]]"). The pathology is below the prompt and sampler layers — see
+    // LIMITATIONS.md. We mitigate by buffering one token of lookahead: if the model
+    // would emit EOS right after a token that duplicates the previous one, the duplicate
+    // is dropped from the stream. Otherwise the buffered token flushes normally.
+    //
+    // Token-id equality is the right check: "Yes..", "3911", "]]", "monde monde" all
+    // appear as <X><X><EOS> with the same id repeated. Legitimate accidental doubles
+    // mid-sentence (e.g. "the the") would also be suppressed, but only when they fall
+    // immediately before EOS — which is the pathological case.
+    private struct StutterGuard
+    {
+        private int _prevEmittedId;
+        private int _bufferedId;
+
+        public StutterGuard() { _prevEmittedId = -1; _bufferedId = -1; }
+
+        // Buffer the freshly generated token; return the previously buffered id to emit
+        // now (or -1 if buffer was empty).
+        public int Push(int newTokenId)
+        {
+            int toEmit = _bufferedId;
+            if (toEmit != -1) _prevEmittedId = toEmit;
+            _bufferedId = newTokenId;
+            return toEmit;
+        }
+
+        // EOS / stop reached: return the final id to emit, or -1 if the buffered token
+        // duplicates the prior emitted one (and is therefore a stutter to be dropped).
+        public int Flush()
+        {
+            int b = _bufferedId;
+            _bufferedId = -1;
+            return (b != -1 && b != _prevEmittedId) ? b : -1;
+        }
+    }
+
     // Load model + tokenizer for any QNN ORT-GenAI bundle. We force QNN/HTP even though
     // genai_config.json already declares it — keeps behavior deterministic across bundles.
     private static (Model model, Tokenizer tokenizer, long loadMs) LoadQnnModel(string modelDir)
@@ -379,6 +418,7 @@ internal static partial class Program
             var swGen = Stopwatch.StartNew();
             long firstTokenMs = 0;
             int tokenCount = 0;
+            var guard = new StutterGuard();
             while (!generator.IsDone())
             {
                 generator.GenerateNextToken();
@@ -387,8 +427,19 @@ internal static partial class Program
 
                 var sequence = generator.GetSequence(0);
                 int lastToken = sequence[sequence.Length - 1];
-                Console.Write(stream.Decode(lastToken));
-                tokenCount++;
+                if (lastToken == template.EosTokenId)
+                {
+                    int final = guard.Flush();
+                    if (final != -1) { Console.Write(stream.Decode(final)); tokenCount++; }
+                    break;
+                }
+                int toEmit = guard.Push(lastToken);
+                if (toEmit != -1) { Console.Write(stream.Decode(toEmit)); tokenCount++; }
+            }
+            // IsDone() exit (max_length / non-EOS stop): drop any unbuffered tail through.
+            {
+                int final = guard.Flush();
+                if (final != -1) { Console.Write(stream.Decode(final)); tokenCount++; }
             }
             swGen.Stop();
 
@@ -571,6 +622,7 @@ internal static partial class Program
                 bool capped = false;
                 bool interrupted = false;
                 bool collapsed = false;
+                var guard = new StutterGuard();
                 try
                 {
                     while (!generator.IsDone())
@@ -592,11 +644,25 @@ internal static partial class Program
                         var sequence = generator.GetSequence(0);
                         int lastToken = sequence[sequence.Length - 1];
 
-                        // Defensive EOS — see RunChat doc above.
+                        // EOS reached: flush the lookahead buffer, dropping it iff it
+                        // duplicates the prior emitted token (the int4-head stutter).
                         if (lastToken == template.EosTokenId)
+                        {
+                            int final = guard.Flush();
+                            if (final != -1)
+                            {
+                                Console.Write(stream.Decode(final));
+                                tokensThisTurn++;
+                            }
                             break;
+                        }
 
-                        var decoded = stream.Decode(lastToken);
+                        // Push the new token through the lookahead buffer. Whatever pops
+                        // out (if anything) is safe to emit — there's a non-EOS successor.
+                        int toEmit = guard.Push(lastToken);
+                        if (toEmit == -1) continue;
+
+                        var decoded = stream.Decode(toEmit);
                         Console.Write(decoded);
                         tokensThisTurn++;
 
@@ -626,6 +692,18 @@ internal static partial class Program
                     Console.WriteLine($"  generation aborted: {ex.GetType().Name}: {ex.Message}");
                     ResetSession();
                     continue;
+                }
+                // Natural IsDone()/max_length exit (no EOS, no break-flag): release any
+                // token still in the lookahead buffer. Skipped for cap/interrupt/collapse
+                // since those code paths deliberately abandon the in-flight token.
+                if (!interrupted && !collapsed && !capped)
+                {
+                    int final = guard.Flush();
+                    if (final != -1)
+                    {
+                        Console.Write(stream.Decode(final));
+                        tokensThisTurn++;
+                    }
                 }
                 swTurn.Stop();
                 Console.WriteLine();
@@ -902,6 +980,7 @@ internal static partial class Program
         bool collapsed = false;
         bool capped = false;
         string stopReason = "eos";
+        var guard = new StutterGuard();
 
         try
         {
@@ -912,9 +991,17 @@ internal static partial class Program
 
                 var seq = generator.GetSequence(0);
                 int lastToken = seq[seq.Length - 1];
-                if (lastToken == template.EosTokenId) break;
+                if (lastToken == template.EosTokenId)
+                {
+                    int final = guard.Flush();
+                    if (final != -1) { sb.Append(stream.Decode(final)); tokens++; }
+                    break;
+                }
 
-                var decoded = stream.Decode(lastToken);
+                int toEmit = guard.Push(lastToken);
+                if (toEmit == -1) continue;
+
+                var decoded = stream.Decode(toEmit);
                 sb.Append(decoded);
                 tokens++;
 
@@ -929,6 +1016,13 @@ internal static partial class Program
                 }
 
                 if (tokens >= maxTokensPerTurn) { capped = true; stopReason = "cap"; break; }
+            }
+            // Cap/collapse/error all deliberately drop the in-flight token; only the
+            // natural IsDone()/max_length exit (no break flag) needs a flush.
+            if (!collapsed && !capped && stopReason == "eos")
+            {
+                int final = guard.Flush();
+                if (final != -1) { sb.Append(stream.Decode(final)); tokens++; }
             }
         }
         catch (Exception ex)
