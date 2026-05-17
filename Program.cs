@@ -114,7 +114,7 @@ internal static partial class Program
         {
             modelOption, thinkingOption, templateOption, maxLengthOption, promptArgument,
         };
-        generateCmd.SetAction(async (pr, _) =>
+        generateCmd.SetAction(async (pr, _ct) =>
         {
             var dir = pr.GetValue(modelOption)!;
             var promptParts = pr.GetValue(promptArgument) ?? Array.Empty<string>();
@@ -127,6 +127,7 @@ internal static partial class Program
                 var (bundleDir, template) = ResolveModel(
                     dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
                 var maxLen = pr.GetValue(maxLengthOption) ?? template.DefaultMaxTokensPerTurn;
+                (maxLen, _) = ApplyContextCap(bundleDir, maxLen, maxLen);
                 RunOneShot(bundleDir, template, prompt, maxLen);
                 return 0;
             }
@@ -171,7 +172,7 @@ internal static partial class Program
             temperatureOption, topPOption, systemOption,
             repetitionPenaltyOption, noRepeatNgramOption,
         };
-        chatCmd.SetAction(async (pr, _) =>
+        chatCmd.SetAction(async (pr, _ct) =>
         {
             var dir = pr.GetValue(modelOption)!;
             await DiagnosticsHeaderAsync();
@@ -185,6 +186,7 @@ internal static partial class Program
                 var system = explicitSystem ?? template.DefaultSystemPrompt;
                 var chatMax = pr.GetValue(chatMaxOption) ?? template.DefaultSessionMaxLength;
                 var perTurn = pr.GetValue(maxPerTurnOption) ?? template.DefaultMaxTokensPerTurn;
+                (chatMax, perTurn) = ApplyContextCap(bundleDir, chatMax, perTurn);
                 RunChat(
                     bundleDir,
                     template,
@@ -221,7 +223,7 @@ internal static partial class Program
             modelOption, thinkingOption, templateOption, benchSuiteOption, benchOutputOption,
             temperatureOption, topPOption, repetitionPenaltyOption, maxPerTurnOption,
         };
-        benchCmd.SetAction(async (pr, _) =>
+        benchCmd.SetAction(async (pr, _ct) =>
         {
             var dir = pr.GetValue(modelOption)!;
             await DiagnosticsHeaderAsync();
@@ -230,6 +232,7 @@ internal static partial class Program
                 var (bundleDir, template) = ResolveModel(
                     dir.FullName, pr.GetValue(thinkingOption), pr.GetValue(templateOption));
                 var perTurn = pr.GetValue(maxPerTurnOption) ?? template.DefaultMaxTokensPerTurn;
+                (_, perTurn) = ApplyContextCap(bundleDir, perTurn, perTurn);
                 RunBench(
                     bundleDir,
                     template,
@@ -255,7 +258,7 @@ internal static partial class Program
         {
             modelOption, thinkingOption,
         };
-        downloadCmd.SetAction(async (pr, _) =>
+        downloadCmd.SetAction(async (pr, _ct) =>
         {
             var root = pr.GetValue(modelOption)!;
             return await DownloadAsync(root.FullName, pr.GetValue(thinkingOption));
@@ -505,12 +508,15 @@ internal static partial class Program
             // with a "be concise" instruction has no measurable effect on output
             // length or format. Leaving this empty by default per DeepSeek's docs.
             DefaultSystemPrompt: "",
-            // <think> + final answer can run 1k–4k tokens on a hard math problem;
-            // the per-turn cap needs to be well past that. Session cap is per-turn
-            // × ~2 to allow at least one follow-up turn before exhausting the KV
-            // cache. Override with --max-tokens-per-turn / --max-length if needed.
-            DefaultMaxTokensPerTurn: 8192,
-            DefaultSessionMaxLength: 16384);
+            // R1-Distill emits 1–4k tokens of <think> before the final answer.
+            // The llmware QNN bundle is compiled with context_length=4096 (baked
+            // into the EPContext shards — it's a hard ceiling, OGA will reject
+            // any larger max_length). Per-turn cap sits just under the context
+            // ceiling so a single <think>+answer fits; the session cap equals
+            // context. Multi-turn chat under --thinking is therefore effectively
+            // one-and-a-half turns before /clear is needed.
+            DefaultMaxTokensPerTurn: 3500,
+            DefaultSessionMaxLength: 4096);
 
         public static ChatTemplate Parse(string name) => name.ToLowerInvariant() switch
         {
@@ -601,6 +607,43 @@ internal static partial class Program
             return ChatTemplate.ChatMl;
         }
         catch { return null; }
+    }
+
+    // Read the model's compiled context length from genai_config.json. OGA rejects
+    // max_length > context_length with an unhandled exception, and the QNN EPContext
+    // shards are baked at compile time to a fixed sequence length, so we have to
+    // respect this. Returns null if the file or field is missing.
+    private static int? ReadContextLength(string bundleDir)
+    {
+        var path = Path.Combine(bundleDir, "genai_config.json");
+        if (!File.Exists(path)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.TryGetProperty("model", out var model)
+                && model.TryGetProperty("context_length", out var cl)
+                && cl.TryGetInt32(out var n)) return n;
+        }
+        catch { /* fall through — caller treats null as 'unknown' */ }
+        return null;
+    }
+
+    // Clip max_length / per-turn budget to the model's compiled context window.
+    // Reports the adjustment so users see why their requested value didn't take.
+    private static (int maxLength, int perTurn) ApplyContextCap(
+        string bundleDir, int maxLength, int perTurn)
+    {
+        var ctx = ReadContextLength(bundleDir);
+        if (ctx is null) return (maxLength, perTurn);
+        var adjustedMax = Math.Min(maxLength, ctx.Value);
+        var adjustedPerTurn = Math.Min(perTurn, adjustedMax);
+        if (adjustedMax != maxLength || adjustedPerTurn != perTurn)
+        {
+            Console.WriteLine(
+                $"  (capping to model context_length={ctx}: max_length {maxLength}→{adjustedMax}, " +
+                $"per-turn {perTurn}→{adjustedPerTurn})");
+        }
+        return (adjustedMax, adjustedPerTurn);
     }
 
     // Default root path: where `download` writes bundles and where the run commands look.
