@@ -29,14 +29,16 @@ on Intel/AMD/non-X-Elite ARM.
 ## Status quo — what works, what is permanently blocked here
 
 **Working path (use this):**
-- ORT-GenAI + QNN EP, direct NPU inference via `--model <dir>`.
-- Bundled model is `llmware/qwen2.5-7b-instruct-onnx-qnn` (Qwen2.5 7B int4, ChatML).
-- Phi-3.5 mini was the original target — we ditched it because of chronic
-  rambling / degenerate output. The chat template hard-coded in Program.cs is
-  now ChatML (`<|im_start|>{role}\n…<|im_end|>\n`), EOS = 151645.
-- On Phi-3.5 mini int4 (3.8B) we saw ~16–18 tok/s decode on the Hexagon HTP;
-  Qwen 7B is roughly 2× the active params so expect noticeably slower decode
-  but better output quality.
+- ORT-GenAI + QNN EP, direct NPU inference. Subcommands resolve the bundle
+  via a small registry (see `Program.cs` → `ModelEntry` / `KnownModels`):
+  - **default**: `llmware/qwen2.5-7b-instruct-onnx-qnn` (Qwen2.5 7B int4, ChatML)
+  - **`--thinking`**: `llmware/deepseek-r1-distill-qwen-7b-onnx-qnn`
+    (R1-distill, `<｜User｜>` / `<｜Assistant｜>` markers, EOS 151643)
+- Phi-3.5 mini was the original target — ditched for chronic rambling.
+- Trailing-duplicate-token stutter (`Yes..`, `bonjour le monde monde`, `3911`)
+  is an int4-lm_head pathology, mitigated in code by `StutterGuard` (one-token
+  lookahead, drops the duplicate before EOS). See `LIMITATIONS.md`.
+- ~13 tok/s decode on both 7B bundles on the Hexagon HTP.
 
 **Dead path on this box (don't chase):**
 - The projected `Microsoft.Windows.AI.*` surface (LanguageModel/Phi Silica,
@@ -66,13 +68,27 @@ dotnet build -c Release
 # Diagnostics only (will report CapabilityMissing for the projected surface)
 dotnet run -c Release
 
-# NPU inference on the model bundle
-dotnet run -c Release -- generate --model C:\temp\models-qwen2.5-7b "<prompt>"
-# Interactive chat
-dotnet run -c Release -- chat --model C:\temp\models-qwen2.5-7b
-# System-prompt × task benchmark (built-in default suite; --suite for custom)
-dotnet run -c Release -- bench --model C:\temp\models-qwen2.5-7b
+# One-time setup: fetch both bundles into C:\temp\testwinai-models
+dotnet run -c Release -- download              # default (Qwen 2.5 7B)
+dotnet run -c Release -- download --thinking   # DeepSeek-R1-Distill-Qwen-7B
+
+# NPU inference — --model defaults to C:\temp\testwinai-models
+dotnet run -c Release -- generate "<prompt>"               # Qwen
+dotnet run -c Release -- generate --thinking "<prompt>"    # DeepSeek-R1
+dotnet run -c Release -- chat                              # multi-turn REPL
+dotnet run -c Release -- chat --thinking
+dotnet run -c Release -- bench                             # default suite
+dotnet run -c Release -- bench --thinking
+
+# Advanced: point at a single bundle directly (template auto-detected)
+dotnet run -c Release -- chat --model C:\path\to\some-bundle
 ```
+
+`--model` can be either the models root dir (containing per-model subdirs by
+slug — `qwen2.5-7b`, `deepseek-r1-7b`) or a single bundle dir containing
+`genai_config.json` directly. Template is auto-detected from the bundle's
+`tokenizer_config.json` (`bos_token` sniff); `--template chatml|deepseek-r1`
+is the manual override.
 
 The `bench` subcommand cross-products a list of system-prompt variants with a list
 of tasks, runs each cell on the NPU, and writes:
@@ -93,15 +109,26 @@ A custom suite is a JSON file with the shape:
 Forward slashes also work for the path (`C:/temp/models-qwen2.5-7b`) and are
 needed when invoking from a bash-style shell (backslashes get eaten).
 
-## Model bundle
+## Model bundles
 
-We use `llmware/qwen2.5-7b-instruct-onnx-qnn` (HF), 3.29 GB on the wire / 3.8 GB
-on disk, placed at `C:\temp\models-qwen2.5-7b`. It's an ORT-GenAI bundle with
-4 × ~825 MB `context_*_ctx_qnn.bin` EPContext shards — those are precompiled QNN
-HTP graphs; CPU EP physically cannot execute them, which is itself a proof-of-NPU
-when the model runs successfully at non-CPU throughput. Embeddings + LM head are
-int4 / fp32 on CPU; transformer blocks run int8-weight × int16-activation on the
-HTP — the de-facto standard for QNN HTP LLM bundles (no FP4/MXFP4 in this format).
+Two known QNN ORT-GenAI bundles live under `C:\temp\testwinai-models\<slug>`:
+
+| Slug | HF repo | Size | Family | Patches |
+|---|---|---|---|---|
+| `qwen2.5-7b` | `llmware/qwen2.5-7b-instruct-onnx-qnn` | 3.29 GB | Qwen2.5-Instruct, ChatML | none |
+| `deepseek-r1-7b` | `llmware/deepseek-r1-distill-qwen-7b-onnx-qnn` | 3.34 GB | DeepSeek-R1-Distill-Qwen, `<｜User｜>` template | strip-backend-path |
+
+Both share the same int8w/int16a transformer-on-NPU layout with int4
+embeddings + lm_head on CPU. The bundles ship 4 × ~825 MB
+`*_ctx_qnn.bin` / `*_cb_*.bin` EPContext shards — precompiled QNN HTP graphs
+the CPU EP physically cannot execute, which itself is proof-of-NPU when the
+model runs at non-CPU throughput.
+
+The DeepSeek bundle's `genai_config.json` pins `backend_path: QnnHtp.dll` on
+its prompt-processor and token-generator session_options, which blocks the
+system-staged QNN EP. The `download` subcommand strips it (and keeps a
+`.orig` backup). Adding a third bundle is a new `ModelEntry` in `KnownModels`
+plus, if needed, a new case in `ApplyPatch`.
 
 Any alternative model must be QNN-compiled for the Hexagon ISA on the target
 machine. The bundled stubs are `QnnHtpV73Stub.dll` and `QnnHtpV81Stub.dll`
