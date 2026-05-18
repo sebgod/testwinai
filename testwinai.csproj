@@ -43,6 +43,19 @@
   </ItemGroup>
 
   <!--
+    Bundled math font for sixel/sextant display-math rendering. STIX Two Math
+    (SIL Open Font License, ships with STIX2-OFL.txt alongside) is the only
+    OpenType MATH-table-bearing font we can rely on across machines — Windows
+    Copilot+ ships it, but the corp-policy machines and stripped-down VMs
+    don't. Console.Lib's MarkdownRenderer.ResolveMathFont() checks
+    AppContext.BaseDirectory/Fonts/STIX2Math.otf first, so dropping the file
+    here makes math rendering robust regardless of system-fonts state.
+  -->
+  <ItemGroup>
+    <Content Include="Fonts/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     Cross-repo ProjectReference into sharpastro/Console.Lib for the alt-screen
     TUI chat path (MarkdownRenderer, VirtualTerminal, TerminalLayout, TextInputBar).
     Pulls Console.Lib + transitive LALR.CC, DIR.Lib, Fonts.Lib, StbImageSharp from

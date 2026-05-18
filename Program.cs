@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 using Microsoft.ML.OnnxRuntimeGenAI;
 using Microsoft.Windows.AI;
@@ -474,6 +475,29 @@ internal static partial class Program
             return sys + UserOpen + userText + UserClose + AssistantOpen;
         }
 
+        // Build a multi-turn prefill from a list of prior (user, assistant) pairs
+        // plus the current user message. Used by re-prefill mode (default for
+        // --thinking) where the chat resets KV between turns and re-encodes the
+        // full conversation history — minus the <think>...</think> blocks the
+        // caller has already stripped from each assistant turn. Trade: pay
+        // prefill cost each turn, in exchange for a conversation that grows
+        // slowly enough to fit several turns inside the 4096 ctx ceiling.
+        public string BuildMultiTurnPrefill(string? systemText,
+            IReadOnlyList<(string User, string Assistant)> history,
+            string currentUser)
+        {
+            var sb = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(systemText))
+                sb.Append(SystemOpen).Append(systemText).Append(SystemClose);
+            foreach (var (u, a) in history)
+            {
+                sb.Append(UserOpen).Append(u).Append(UserClose);
+                sb.Append(AssistantOpen).Append(a).Append(AssistantClose);
+            }
+            sb.Append(UserOpen).Append(currentUser).Append(UserClose).Append(AssistantOpen);
+            return sb.ToString();
+        }
+
         public static readonly ChatTemplate ChatMl = new(
             Name: "chatml",
             SystemOpen: "<|im_start|>system\n", SystemClose: "<|im_end|>\n",
@@ -794,6 +818,31 @@ internal static partial class Program
     // maxTokensPerTurn is a second belt-and-braces cap so a runaway turn can't drain
     // the session budget. The actual EOS id lives on `template`.
 
+    /// <summary>
+    /// Phase the chat REPL is in during a turn. Used by the streaming UX to
+    /// decide whether to show the "thinking…" spinner, the "responding…"
+    /// spinner, or flush a completed paragraph through the markdown renderer.
+    /// PreThink only applies to models that emit a <c>&lt;think&gt;</c> block
+    /// (DeepSeek-R1-Distill in our registry); non-thinking models (Qwen) start
+    /// directly in Responding.
+    /// </summary>
+    private enum ChatPhase { PreThink, Thinking, Responding }
+
+    /// <summary>
+    /// Removes <c>&lt;think&gt;…&lt;/think&gt;</c> blocks from a turn's raw
+    /// model output before it's stored in the re-prefill history. DeepSeek-R1's
+    /// model card recommends not feeding prior reasoning back as context — it
+    /// bloats the conversation 5–20× without improving subsequent answers, and
+    /// the 4096-token ceiling makes it the difference between 1 and 4 multi-turn
+    /// exchanges. Non-greedy across the block body, also strips any trailing
+    /// whitespace so the assistant message starts at its real content.
+    /// </summary>
+    private static string StripThinkBlocks(string text) =>
+        ThinkBlockRegex.Replace(text, string.Empty).TrimStart('\r', '\n', ' ', '\t');
+
+    private static readonly Regex ThinkBlockRegex =
+        new(@"<think>[\s\S]*?</think>\s*", RegexOptions.Compiled);
+
     private static async Task RunChat(
         string modelDir,
         ChatTemplate template,
@@ -818,23 +867,44 @@ internal static partial class Program
         // VirtualTerminal probes DA1 to pick the math-rendering mode. We don't
         // enter the alternate screen — chat REPL benefits from staying in the
         // main scrollback so prior turns remain visible after /exit. The
-        // markdown post-render uses save-cursor / restore-cursor (\e[s / \e[u)
-        // around each streamed turn to replace the live token stream with the
-        // styled rendering, all within the primary screen buffer.
+        // per-turn UX (see the ChatPhase state machine inside the loop below)
+        // hides the raw token stream behind a "thinking…" / "responding…"
+        // spinner and flushes the response paragraph-by-paragraph through
+        // MarkdownRenderer, so the user only ever sees styled output — no
+        // mid-stream reformat-flash.
         global::Console.Lib.BoxRenderMode? mathMode = null;
+        var mathModeReason = "(probe not run yet)";
         try
         {
             await using var probeTerm = new global::Console.Lib.VirtualTerminal();
             await probeTerm.InitAsync();
-            mathMode = probeTerm.HasSixelSupport
-                ? global::Console.Lib.BoxRenderMode.Sixel
-                : global::Console.Lib.BoxRenderMode.Sextant;
+            if (probeTerm.HasSixelSupport)
+            {
+                mathMode = global::Console.Lib.BoxRenderMode.Sixel;
+                mathModeReason = "DA1 advertised sixel (\\e[?…;4;…c)";
+            }
+            else
+            {
+                mathMode = global::Console.Lib.BoxRenderMode.Sextant;
+                mathModeReason = "DA1 did not advertise sixel — falling back to sextant (Unicode 2x3 cells)";
+            }
         }
-        catch
+        catch (Exception ex)
         {
             // Stdin/stdout redirected, no TTY, or some other probe failure —
             // fall back to single-row Unicode math (mathMode stays null).
+            mathModeReason = $"probe failed ({ex.GetType().Name}: {ex.Message}) — Unicode fallback only";
         }
+        System.Console.WriteLine($"  math render: {mathMode?.ToString() ?? "Unicode"}  [{mathModeReason}]");
+
+        // Math-font discovery. Console.Lib's renderer takes an optional font
+        // path so the library itself doesn't need to know about AppContext —
+        // the caller (us) provides whatever path makes sense for the host.
+        // We ship STIX2Math.otf in Fonts/ via the csproj Content include; it
+        // lands next to testwinai.exe in both `dotnet run` and AOT publish.
+        var bundledMathFont = Path.Combine(AppContext.BaseDirectory, "Fonts", "STIX2Math.otf");
+        var mathFontPath = File.Exists(bundledMathFont) ? bundledMathFont : null;
+        System.Console.WriteLine($"  math font:   {(mathFontPath != null ? bundledMathFont : "(bundled font missing — falling back to system fonts)")}");
 
         var (model, tokenizer, loadMs) = LoadQnnModel(modelDir);
         try
@@ -843,7 +913,7 @@ internal static partial class Program
             System.Console.WriteLine($"  max-length={maxLength}, max-tokens-per-turn={maxTokensPerTurn}, " +
                               $"temperature={temperature}, top-p={topP}, " +
                               $"rep-penalty={repetitionPenalty}, no-repeat-ngram={noRepeatNgramSize}");
-            System.Console.WriteLine("  /exit  /clear  /stats  /help");
+            System.Console.WriteLine("  /exit  /clear  /stats  /trim  /summarize  /raw  /help");
             System.Console.WriteLine("  Ctrl+C or Esc during generation = interrupt this turn. (PowerShell");
             System.Console.WriteLine("   sometimes forwards Ctrl+C as termination instead — use Esc if so.)");
 
@@ -863,10 +933,27 @@ internal static partial class Program
             int turnCount = 0;
             long lastTurnMs = 0;
             int lastTurnTokens = 0;
+            string lastTurnRaw = string.Empty;
             // Two consecutive AppendTokenSequences calls on a fresh Generator under OGA-QNN
             // don't accumulate — only the last append takes effect (the bench bug). So we
             // defer the system message and bundle it with the first user turn's prefill.
             bool needsSystemPrefill = false;
+
+            // Re-prefill mode: each turn drops the KV cache and re-encodes the full
+            // conversation history (user + assistant pairs) minus the <think> blocks.
+            // Pays prefill cost per turn but lets several thinking-model turns fit
+            // in 4096 ctx. Default ON for the DeepSeek-R1-Distill template; OFF for
+            // ChatML (Qwen) where there's no <think> to strip and the stateful KV
+            // is just faster.
+            //
+            // When OFF, the stateful KV path (existing behaviour) runs unchanged.
+            var reprefillMode = template.Name == "deepseek-r1";
+            var history = new List<(string User, string Assistant)>();
+            // When set, the next completed turn replaces the history with just
+            // that turn's stripped output — used by /summarize to compress the
+            // conversation into a single (synthetic user, summary) pair.
+            var nextTurnIsSummary = false;
+            const double TrimAutoThreshold = 0.70;
 
             void ResetSession()
             {
@@ -885,6 +972,16 @@ internal static partial class Program
                 generator = new Generator(model, gparams);
                 turnCount = 0;
                 needsSystemPrefill = !string.IsNullOrWhiteSpace(system);
+            }
+
+            // /clear and re-prefill both want the conversation history wiped along
+            // with the KV cache. Stateful-mode /clear gets it for free (no history
+            // was kept); re-prefill mode needs it explicit.
+            void ResetSessionFull()
+            {
+                ResetSession();
+                history.Clear();
+                nextTurnIsSummary = false;
             }
 
             ResetSession();
@@ -918,12 +1015,16 @@ internal static partial class Program
                 {
                     System.Console.WriteLine("  /exit | /quit   leave");
                     System.Console.WriteLine("  /clear          reset conversation (model stays loaded)");
-                    System.Console.WriteLine("  /stats          last-turn timing");
+                    System.Console.WriteLine("  /stats          last-turn timing + context usage");
+                    System.Console.WriteLine("  /trim           drop oldest history turn (fast, no decode)");
+                    System.Console.WriteLine("  /summarize      compress history via the model (slow on thinking models)");
+                    System.Console.WriteLine("  /raw            dump the raw model text from the last turn (pre-render)");
+                    System.Console.WriteLine("  /raw <file>     write raw last-turn text to <file>");
                     continue;
                 }
                 if (line.Equals("/clear", StringComparison.OrdinalIgnoreCase))
                 {
-                    ResetSession();
+                    ResetSessionFull();
                     System.Console.WriteLine("  (conversation reset)");
                     continue;
                 }
@@ -935,17 +1036,136 @@ internal static partial class Program
                         var tps = lastTurnTokens * 1000.0 / Math.Max(1, lastTurnMs);
                         System.Console.WriteLine($"  last turn: {lastTurnTokens} tokens in {lastTurnMs} ms ({tps:0.0} tok/s)");
                     }
+                    // Context usage. In re-prefill mode the KV cache resets between
+                    // turns, so the "after a turn" length is what next-turn's prefill
+                    // will start from — i.e. the size of the conversation that's
+                    // about to be re-encoded. In stateful mode it's the accumulated
+                    // cache.
+                    try
+                    {
+                        var seqLen = generator.GetSequence(0).Length;
+                        var pct = seqLen * 100.0 / Math.Max(1, maxLength);
+                        var remaining = Math.Max(0, maxLength - seqLen);
+                        System.Console.WriteLine(
+                            $"  context: {seqLen} / {maxLength} tokens ({pct:0}%, {remaining} remaining)");
+                    }
+                    catch { }
+                    if (reprefillMode)
+                        System.Console.WriteLine($"  history: {history.Count} retained turn(s) (re-prefill mode)");
+                    continue;
+                }
+                // /trim drops the oldest history entry. Fast (no LLM decode),
+                // loses earliest context but preserves recent turns. This is what
+                // the auto-trigger uses when context goes over the threshold,
+                // since running /summarize automatically on a thinking model
+                // would burn ~90s of decode time (the model's <think> for "how
+                // to summarize" is ~10× longer than the summary itself).
+                if (line.Equals("/trim", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!reprefillMode)
+                    {
+                        System.Console.WriteLine("  /trim only works in re-prefill mode.");
+                        continue;
+                    }
+                    if (history.Count == 0)
+                    {
+                        System.Console.WriteLine("  (nothing to trim)");
+                        continue;
+                    }
+                    var dropped = history[0];
+                    history.RemoveAt(0);
+                    // Drop the KV cache too. Without this, /stats would still
+                    // report the just-completed turn's full sequence length
+                    // until the next user turn fires its own ResetSession +
+                    // re-encode — visually confusing ("0 retained" but
+                    // "2700/4096 used" in the same breath). Next user turn
+                    // will repopulate the cache from the (now smaller) history.
+                    ResetSession();
+                    System.Console.WriteLine($"  trimmed: oldest turn ({dropped.Assistant.Length} chars dropped) — {history.Count} retained; KV reset");
+                    continue;
+                }
+                // /summarize compresses the conversation history into a single
+                // assistant-generated summary, freeing up most of the 4096-token
+                // budget for further turns. Only meaningful in re-prefill mode
+                // (stateful mode would need a full KV-rebuild anyway); flagged as a
+                // no-op when there's nothing to summarise yet.
+                if (line.Equals("/summarize", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!reprefillMode)
+                    {
+                        System.Console.WriteLine("  /summarize only works in re-prefill mode (--thinking models).");
+                        continue;
+                    }
+                    if (history.Count == 0)
+                    {
+                        System.Console.WriteLine("  (nothing to summarize yet)");
+                        continue;
+                    }
+                    // Convert the slash command into a synthetic user message and
+                    // let the rest of the turn loop run normally. The post-turn
+                    // bookkeeping (below) sees `nextTurnIsSummary` and replaces
+                    // history with just (synthetic-user, generated-summary) instead
+                    // of appending.
+                    line = "Summarize our conversation so far concisely (≤200 tokens), keeping any facts that might be useful in subsequent turns.";
+                    nextTurnIsSummary = true;
+                }
+                // /raw dumps the raw token-decode buffer from the last turn so the
+                // user can diagnose render issues against the actual model output
+                // (before macro pre-processing and Markdig touch it). Optional
+                // argument writes to a file instead of stdout.
+                if (line.Equals("/raw", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("/raw ", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (lastTurnRaw.Length == 0)
+                    {
+                        System.Console.WriteLine("  (no turns yet)");
+                    }
+                    else if (line.Length > "/raw ".Length)
+                    {
+                        var path = line.Substring("/raw ".Length).Trim().Trim('"');
+                        try
+                        {
+                            File.WriteAllText(path, lastTurnRaw);
+                            System.Console.WriteLine($"  wrote {lastTurnRaw.Length} chars to {path}");
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Console.WriteLine($"  write failed: {ex.GetType().Name}: {ex.Message}");
+                        }
+                    }
+                    else
+                    {
+                        System.Console.WriteLine($"── raw last turn ({lastTurnRaw.Length} chars) ──");
+                        System.Console.WriteLine(lastTurnRaw);
+                        System.Console.WriteLine("──");
+                    }
                     continue;
                 }
 
-                // Encode just this turn's user wrapper, plus the system message if this is
-                // the first turn after ResetSession. The KV cache from prior turns is already
-                // inside `generator`; we only add new tokens.
-                var turnPrompt = template.BuildPrefill(
-                    needsSystemPrefill ? system : null,
-                    line);
+                // Two prefill paths:
+                //   - Stateful (ChatML / Qwen): the KV cache from prior turns lives
+                //     in `generator`; we only encode the new user wrapper (+system
+                //     on the first post-reset turn) and append it.
+                //   - Re-prefill (DeepSeek-R1): drop the cache, re-encode the full
+                //     conversation (system + every prior user/assistant pair with
+                //     <think> stripped + the current user message) as one prefill.
+                //     Pays the prefill cost per turn but stops <think> blocks from
+                //     accumulating in the cache.
+                string turnPrompt;
+                if (reprefillMode)
+                {
+                    ResetSession();   // drops the KV cache; history list survives.
+                    turnPrompt = template.BuildMultiTurnPrefill(system, history, line);
+                    needsSystemPrefill = false;
+                }
+                else
+                {
+                    turnPrompt = template.BuildPrefill(
+                        needsSystemPrefill ? system : null,
+                        line);
+                    needsSystemPrefill = false;
+                }
                 using var turnTokens = tokenizer.Encode(turnPrompt);
-                needsSystemPrefill = false;
 
                 try
                 {
@@ -958,14 +1178,36 @@ internal static partial class Program
                     continue;
                 }
 
-                System.Console.Write("ai>  ");
-                // Save cursor position right after the "ai>  " prompt. After the
-                // turn finishes we'll restore + clear-to-end-of-screen and replace
-                // the live token stream with the styled MarkdownRenderer output
-                // (fenced code, math, headings, lists, etc.). The save/restore
-                // round-trip lives in the primary screen buffer, so scrollback
-                // for prior turns stays intact.
-                System.Console.Write("\e[s");
+                System.Console.WriteLine("ai>");
+                // Two-phase streaming UX. For thinking models (DeepSeek-R1) the
+                // model emits 200–4000 tokens of <think>…</think> reasoning
+                // before its actual answer — showing that as raw stream is
+                // noisy. We watch the cumulative decoded text for `<think>` /
+                // `</think>` markers and render a spinner for each phase:
+                //
+                //   PreThink   →  "thinking…" spinner waiting for <think>
+                //   Thinking   →  "thinking…" spinner with token count
+                //   Responding →  "responding…" spinner; buffered until \n\n,
+                //                 then each completed paragraph is rendered
+                //                 through MarkdownRenderer and flushed.
+                //
+                // Non-thinking models (Qwen) start in Responding directly. The
+                // spinner stays on its own line and overwrites itself with \r
+                // + \e[K; before flushing a paragraph we clear the spinner line
+                // so the rendered output doesn't overlap.
+                int renderWidth;
+                try { renderWidth = System.Console.WindowWidth; if (renderWidth <= 0) renderWidth = 80; }
+                catch { renderWidth = 80; }
+
+                var thinkingModel = template.Name == "deepseek-r1";
+                var phase = thinkingModel ? ChatPhase.PreThink : ChatPhase.Responding;
+                int responseStart = 0;     // index into turnBuf where post-</think> content begins
+                int responseRendered = 0;  // bytes of post-</think> content already flushed to terminal
+                int thinkTokenCount = 0;
+                int spinnerIdx = 0;
+                long lastSpinnerMs = 0;
+                var spinnerSw = Stopwatch.StartNew();
+
                 interruptRequested = false;
                 var swTurn = Stopwatch.StartNew();
                 long firstTokenMs = 0;
@@ -976,12 +1218,84 @@ internal static partial class Program
                 bool collapsed = false;
                 var guard = new StutterGuard();
                 var turnBuf = new StringBuilder();
-                // Local helper: write a token's decoded text to stdout AND mirror it
-                // into turnBuf so we have the full turn text for the post-render.
+
+                void DrawSpinner(string label)
+                {
+                    var now = spinnerSw.ElapsedMilliseconds;
+                    if (now - lastSpinnerMs < 80) return;
+                    lastSpinnerMs = now;
+                    var frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[spinnerIdx++ % 10];
+                    System.Console.Write($"\r{frame} {label}\e[K");
+                }
+
+                void ClearSpinnerLine() => System.Console.Write("\r\e[K");
+
+                void RenderParagraph(string text)
+                {
+                    var rendered = global::Console.Lib.MarkdownRenderer.RenderLines(
+                        text, renderWidth,
+                        global::Console.Lib.ColorMode.TrueColor,
+                        theme: null,
+                        mathMode: mathMode,
+                        mathFontPath: mathFontPath);
+                    foreach (var rl in rendered)
+                        System.Console.WriteLine(rl);
+                }
+
+                void FlushParagraphs()
+                {
+                    while (true)
+                    {
+                        var full = turnBuf.ToString();
+                        var sliceStart = responseStart + responseRendered;
+                        if (sliceStart >= full.Length) break;
+                        var idx = full.IndexOf("\n\n", sliceStart, StringComparison.Ordinal);
+                        if (idx < 0) break;
+                        ClearSpinnerLine();
+                        var paragraph = full.Substring(sliceStart, idx - sliceStart).Trim();
+                        if (paragraph.Length > 0)
+                        {
+                            RenderParagraph(paragraph);
+                            System.Console.WriteLine();
+                        }
+                        responseRendered = idx + 2 - responseStart;
+                    }
+                }
+
+                // Local helper: append a token's decoded text to turnBuf, advance
+                // phase + spinner / paragraph flush. The raw text is never written
+                // to the terminal directly — only the spinner and the rendered
+                // paragraphs emit to stdout.
                 void Emit(string s)
                 {
-                    System.Console.Write(s);
                     turnBuf.Append(s);
+                    var full = turnBuf.ToString();
+
+                    if (phase == ChatPhase.PreThink)
+                    {
+                        if (full.IndexOf("<think>", StringComparison.Ordinal) >= 0)
+                            phase = ChatPhase.Thinking;
+                    }
+                    if (phase == ChatPhase.Thinking)
+                    {
+                        thinkTokenCount++;
+                        DrawSpinner($"🧠 thinking… {thinkTokenCount} tokens");
+                        var closeIdx = full.IndexOf("</think>", StringComparison.Ordinal);
+                        if (closeIdx >= 0)
+                        {
+                            ClearSpinnerLine();
+                            phase = ChatPhase.Responding;
+                            responseStart = closeIdx + "</think>".Length;
+                            responseRendered = 0;
+                            FlushParagraphs();
+                            DrawSpinner("💬 responding…");
+                        }
+                    }
+                    else if (phase == ChatPhase.Responding)
+                    {
+                        FlushParagraphs();
+                        DrawSpinner("💬 responding…");
+                    }
                 }
                 try
                 {
@@ -1066,36 +1380,39 @@ internal static partial class Program
                     }
                 }
                 swTurn.Stop();
-                // Replace the live token stream with the MarkdownRenderer output:
-                // restore cursor to right after "ai>  ", clear from there to end of
-                // screen, then emit a newline + the rendered lines. Headings, lists,
-                // bold, fenced code, and math all pick up their styled form. On any
-                // failure (renderer throws, terminal doesn't honour the save/restore
-                // escape, etc.) the catch falls back to the plain streamed output by
-                // just emitting a newline like the pre-Console.Lib code did.
-                if (turnBuf.Length > 0)
+                // Final flush at EOS. Clear the running spinner line and emit
+                // whatever's left in the turn buffer:
+                //   PreThink   — model never opened <think>; treat the whole
+                //                buffer as response prose.
+                //   Thinking   — model opened <think> but never closed it
+                //                (interrupted / capped / collapsed). Surface
+                //                the raw reasoning so the user sees what the
+                //                model was producing.
+                //   Responding — render any tail that doesn't end with \n\n.
+                try
                 {
-                    try
+                    ClearSpinnerLine();
+                    if (turnBuf.Length > 0)
                     {
-                        int width;
-                        try { width = System.Console.WindowWidth; if (width <= 0) width = 80; }
-                        catch { width = 80; }
-                        System.Console.Write("\e[u\e[J");
-                        System.Console.WriteLine();
-                        var rendered = global::Console.Lib.MarkdownRenderer.RenderLines(
-                            turnBuf.ToString(), width,
-                            global::Console.Lib.ColorMode.TrueColor,
-                            theme: null,
-                            mathMode: mathMode);
-                        foreach (var renderedLine in rendered)
-                            System.Console.WriteLine(renderedLine);
-                    }
-                    catch
-                    {
-                        System.Console.WriteLine();
+                        if (phase == ChatPhase.Responding)
+                        {
+                            var full = turnBuf.ToString();
+                            var tail = full.Substring(responseStart + responseRendered).Trim();
+                            if (tail.Length > 0)
+                                RenderParagraph(tail);
+                        }
+                        else if (phase == ChatPhase.Thinking)
+                        {
+                            System.Console.WriteLine("(<think> not closed — raw reasoning follows)");
+                            RenderParagraph(turnBuf.ToString());
+                        }
+                        else
+                        {
+                            RenderParagraph(turnBuf.ToString());
+                        }
                     }
                 }
-                else
+                catch
                 {
                     System.Console.WriteLine();
                 }
@@ -1120,6 +1437,7 @@ internal static partial class Program
 
                 lastTurnMs = swTurn.ElapsedMilliseconds;
                 lastTurnTokens = tokensThisTurn;
+                lastTurnRaw = turnBuf.ToString();
                 turnCount++;
                 var decodeMs = lastTurnMs - firstTokenMs;
                 var decodeTps = tokensThisTurn > 1 && decodeMs > 0
@@ -1127,6 +1445,68 @@ internal static partial class Program
                     : 0.0;
                 System.Console.WriteLine(
                     $"  [turn {turnCount}: {tokensThisTurn} tok, prefill={firstTokenMs} ms, decode={decodeMs} ms ({decodeTps:0.0} tok/s)]");
+
+                // Re-prefill bookkeeping. Only run if the turn actually produced
+                // usable content (interrupt / collapse / cap paths abandoned the
+                // turn and shouldn't pollute the history).
+                if (reprefillMode && !interrupted && !collapsed && turnBuf.Length > 0)
+                {
+                    var stripped = StripThinkBlocks(turnBuf.ToString());
+                    if (stripped.Length > 0)
+                    {
+                        if (nextTurnIsSummary)
+                        {
+                            // /summarize: discard prior history, keep just this
+                            // (synthetic user msg, generated summary) pair as the
+                            // new starting point.
+                            history.Clear();
+                            history.Add((line, stripped));
+                            nextTurnIsSummary = false;
+                            System.Console.WriteLine("  (history compressed to summary)");
+                        }
+                        else
+                        {
+                            history.Add((line, stripped));
+                        }
+                    }
+                }
+                // Post-turn context check.
+                //   - Re-prefill mode + 2+ history entries: auto-/trim. Fast,
+                //     synchronous, no LLM decode — just drops the oldest pair.
+                //     User can /summarize manually if they want a coherent
+                //     compression instead (slow, ~90s on thinking models).
+                //   - Re-prefill mode + single big turn: warn — can't trim
+                //     further without losing the only history we have.
+                //   - Stateful mode: just warn — no in-place compression.
+                try
+                {
+                    var seqLen = generator.GetSequence(0).Length;
+                    if (seqLen >= maxLength * TrimAutoThreshold)
+                    {
+                        var pct = seqLen * 100.0 / maxLength;
+                        if (reprefillMode && history.Count >= 2)
+                        {
+                            var droppedAssistant = history[0].Assistant;
+                            history.RemoveAt(0);
+                            System.Console.WriteLine(
+                                $"  ⚠  context at {pct:0}% — auto-trimmed oldest turn " +
+                                $"({droppedAssistant.Length} chars; {history.Count} retained). " +
+                                "Use /summarize for a coherent compression instead.");
+                        }
+                        else if (reprefillMode)
+                        {
+                            System.Console.WriteLine(
+                                $"  ⚠  context at {pct:0}% ({seqLen}/{maxLength}). " +
+                                "Single big turn — /clear or /summarize.");
+                        }
+                        else
+                        {
+                            System.Console.WriteLine(
+                                $"  ⚠  context at {pct:0}% ({seqLen}/{maxLength}). Consider /clear to reset.");
+                        }
+                    }
+                }
+                catch { }
             }
 
             System.Console.CancelKeyPress -= cancelHandler;
