@@ -23,8 +23,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # win-arm64 only: Microsoft.ML.OnnxRuntimeGenAI.QNN ships native
+        # binaries for arm64 only (Hexagon NPU target). A win-x64 publish
+        # fails at copy time on missing runtimes/win-x64/native/*.
         include:
-          - { os: windows-latest, rid: win-x64 }
           - { os: windows-11-arm, rid: win-arm64 }
 
     runs-on: ${{ matrix.os }}
