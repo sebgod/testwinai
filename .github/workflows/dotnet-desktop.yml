@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: testwinai
+    - uses: actions/checkout@v4
+      with:
+        repository: sebgod/sharpastro
+        path: sharpastro
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - run: dotnet build testwinai/testwinai.csproj -c Release
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, rid: win-x64 }
+          - { os: windows-11-arm, rid: win-arm64 }
+
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: testwinai
+    - uses: actions/checkout@v4
+      with:
+        repository: sebgod/sharpastro
+        path: sharpastro
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: Publish testwinai
+      run: dotnet publish testwinai/testwinai.csproj -r ${{ matrix.rid }} -c Release
+    - uses: actions/upload-artifact@v4
+      with:
+        name: testwinai-${{ matrix.rid }}
+        path: testwinai/bin/Release/net10.0-windows10.0.26100.0/${{ matrix.rid }}/publish/
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    - name: Create release archives
+      run: |
+        cd artifacts
+        for dir in testwinai-*/; do
+          name="${dir%/}"
+          tar -czf "../${name}.tar.gz" -C "$dir" .
+        done
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: build-${{ github.run_number }}
+        name: Build ${{ github.run_number }}
+        generate_release_notes: true
+        files: testwinai-*.tar.gz
