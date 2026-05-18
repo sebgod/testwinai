@@ -1,0 +1,23 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Allow floating versions so sibling-tracked packages auto-pick up new
+         CI publishes without manual bumps. -->
+    <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Windows on-device AI surface. -->
+    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
+    <PackageVersion Include="Microsoft.Windows.AI.MachineLearning" Version="2.0.300" />
+
+    <!-- ORT GenAI with the QNN execution provider for direct NPU inference. -->
+    <PackageVersion Include="Microsoft.ML.OnnxRuntimeGenAI.QNN" Version="0.13.1" />
+
+    <!-- CLI parsing. -->
+    <PackageVersion Include="System.CommandLine" Version="2.0.8" />
+
+    <!-- SharpAstro Console.Lib (alt-screen TUI + MarkdownRenderer). Tracks the
+         2.12.x line; floating so CI publishes flow in without manual bumps. -->
+    <PackageVersion Include="Console.Lib" Version="2.12.*" />
+  </ItemGroup>
+</Project>

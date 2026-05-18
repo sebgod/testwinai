@@ -24,16 +24,16 @@
 
   <ItemGroup>
     <!-- Phi Silica + Windows AI Text/Imaging APIs live here. -->
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
 
     <!-- ExecutionProviderCatalog (bring-your-own ONNX path). -->
-    <PackageReference Include="Microsoft.Windows.AI.MachineLearning" Version="2.0.300" />
+    <PackageReference Include="Microsoft.Windows.AI.MachineLearning" />
 
     <!-- ORT GenAI with the QNN execution provider for direct NPU inference.
          The .QNN flavor transitively brings Microsoft.ML.OnnxRuntime.QNN 1.24.4
          which bundles the QNN EP native binaries (HTP backend for Hexagon NPU). -->
-    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.QNN" Version="0.13.1" />
-    <PackageReference Include="System.CommandLine" Version="2.0.8" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.QNN" />
+    <PackageReference Include="System.CommandLine" />
   </ItemGroup>
 
   <ItemGroup>
@@ -56,13 +56,19 @@
   </ItemGroup>
 
   <!--
-    Cross-repo ProjectReference into sharpastro/Console.Lib for the alt-screen
-    TUI chat path (MarkdownRenderer, VirtualTerminal, TerminalLayout, TextInputBar).
-    Pulls Console.Lib + transitive LALR.CC, DIR.Lib, Fonts.Lib, StbImageSharp from
-    sibling working trees. Console.Lib is IsAotCompatible=true so this stays AOT-clean.
+    Console.Lib drives the alt-screen TUI chat path (MarkdownRenderer,
+    VirtualTerminal, TerminalLayout, TextInputBar). When a sibling working
+    copy of sharpastro/Console.Lib is present, it's wired in as a
+    ProjectReference (UseLocalSiblings=true in Directory.Build.props) for
+    fast in-tree iteration; otherwise we fall through to the NuGet package
+    (version floats on 2.12.* in Directory.Packages.props). Console.Lib is
+    IsAotCompatible=true so either path stays AOT-clean.
   -->
-  <ItemGroup>
+  <ItemGroup Condition="'$(UseLocalSiblings)' == 'true'">
     <ProjectReference Include="..\..\sharpastro\Console.Lib\src\Console.Lib\Console.Lib.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
+    <PackageReference Include="Console.Lib" />
   </ItemGroup>
 
 </Project>
